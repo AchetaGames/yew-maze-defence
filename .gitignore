@@ -1,0 +1,23 @@
+# --- Rust ---
+/target/
+/Cargo.lock
+
+# If you’re building a library, you may want to keep Cargo.lock
+# Uncomment the next line if you want to commit it for apps:
+# !Cargo.lock
+
+# --- Trunk ---
+/dist/
+/build/
+/. Trunk
+
+# --- IDEs (JetBrains: RustRover, IntelliJ, CLion, etc.) ---
+.idea/
+/*.iml
+
+# --- OS-generated files ---
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log
