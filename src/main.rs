@@ -128,11 +128,19 @@ fn run_view(props: &RunViewProps) -> Html {
     let canvas_ref = use_node_ref();
     let camera = use_mut_ref(|| Camera::default());
     let mining = use_mut_ref(|| Mining::default());
+    // Shared latest RunState snapshot for safe updates across async/event closures
+    let rs_ref = use_mut_ref(|| (*props.run_state).clone());
+    // Keep rs_ref synchronized with the latest committed state each render
+    {
+        let mut s = rs_ref.borrow_mut();
+        *s = (*props.run_state).clone();
+    }
 
     {
         let canvas_ref = canvas_ref.clone();
         let camera = camera.clone();
         let run_state = props.run_state.clone();
+        let rs_ref = rs_ref.clone();
 
         use_effect_with((), move |_| {
             let window = web_sys::window().expect("no global `window` exists");
@@ -380,12 +388,13 @@ fn run_view(props: &RunViewProps) -> Html {
 
             // Seed initial path before first draw
             {
-                let rs0 = (*run_state).clone();
-                if rs0.path.is_empty() {
-                    let mut rs2 = rs0.clone();
-                    rs2.path = compute_path(&rs0);
-                    run_state.set(rs2);
+                let mut s = rs_ref.borrow_mut();
+                if s.path.is_empty() {
+                    let path = compute_path(&s);
+                    s.path = path;
+                    run_state.set((*s).clone());
                 }
+                drop(s);
             }
 
             draw();
@@ -394,6 +403,7 @@ fn run_view(props: &RunViewProps) -> Html {
             let mining_tick = {
                 let run_state = run_state.clone();
                 let mining = mining.clone();
+                let rs_ref = rs_ref.clone();
                 let draw = draw.clone();
                 Closure::wrap(Box::new(move || {
                     let mut m = mining.borrow_mut();
@@ -413,25 +423,27 @@ fn run_view(props: &RunViewProps) -> Html {
                         m.progress = (m.elapsed_secs / m.required_secs).min(1.0);
                         if m.progress >= 1.0 {
                             drop(m);
-                            // complete mining
-                            let mut latest = (*run_state).clone();
-                            let mut grant_gold = false;
-                            if let model::TileKind::Rock { has_gold, .. } = latest.tiles[idx].kind.clone() {
-                                latest.tiles[idx].kind = model::TileKind::Empty;
-                                latest.stats.blocks_mined = latest.stats.blocks_mined.saturating_add(1);
-                                latest.currencies.tile_credits = latest.currencies.tile_credits.saturating_add(1);
-                                grant_gold = has_gold;
+                            // complete mining using rs_ref to avoid lost updates
+                            {
+                                let mut s = rs_ref.borrow_mut();
+                                let mut grant_gold = false;
+                                if let model::TileKind::Rock { has_gold, .. } = s.tiles[idx].kind.clone() {
+                                    s.tiles[idx].kind = model::TileKind::Empty;
+                                    s.stats.blocks_mined = s.stats.blocks_mined.saturating_add(1);
+                                    s.currencies.tile_credits = s.currencies.tile_credits.saturating_add(1);
+                                    grant_gold = has_gold;
+                                }
+                                if grant_gold {
+                                    s.currencies.gold = s.currencies.gold.saturating_add(1);
+                                    let gs2 = s.grid_size;
+                                    let tx = (idx as u32) % gs2.width;
+                                    let ty = (idx as u32) / gs2.width;
+                                    clog(&format!("gold +1 -> {} (mined @{}, {})", s.currencies.gold, tx, ty));
+                                }
+                                // Recompute path after terrain change
+                                s.path = compute_path(&s);
+                                run_state.set((*s).clone());
                             }
-                            if grant_gold {
-                                latest.currencies.gold = latest.currencies.gold.saturating_add(1);
-                                let gs2 = latest.grid_size;
-                                let tx = (idx as u32) % gs2.width;
-                                let ty = (idx as u32) / gs2.width;
-                                clog(&format!("gold +1 -> {} (mined @{}, {})", latest.currencies.gold, tx, ty));
-                            }
-                            // Recompute path after terrain change
-                            latest.path = compute_path(&latest);
-                            run_state.set(latest);
                             let mut m2 = mining.borrow_mut();
                             m2.active = false;
                             m2.mouse_down = false;
@@ -441,11 +453,13 @@ fn run_view(props: &RunViewProps) -> Html {
                             draw();
                             return;
                         } else {
-                            // ensure timer starts on first mining progress (use latest state to avoid overwriting other fields)
-                            let mut latest2 = (*run_state).clone();
-                            if !latest2.started {
-                                latest2.started = true;
-                                run_state.set(latest2);
+                            // ensure timer starts on first mining progress using rs_ref
+                            {
+                                let mut s = rs_ref.borrow_mut();
+                                if !s.started {
+                                    s.started = true;
+                                    run_state.set((*s).clone());
+                                }
                             }
                         }
                         drop(m);
@@ -462,71 +476,77 @@ fn run_view(props: &RunViewProps) -> Html {
             // Simulation tick (~60 FPS) for enemies
             let sim_tick = {
                 let run_state = run_state.clone();
+                let rs_ref = rs_ref.clone();
                 let draw = draw.clone();
                 Closure::wrap(Box::new(move || {
-                    let mut rs = (*run_state).clone();
-                    if rs.started && !rs.is_paused {
-                        if rs.path.is_empty() {
-                            rs.path = compute_path(&rs);
-                        }
-                        // Spawn cadence: every 2 seconds if path is ready
-                        let t = rs.stats.time_survived_secs;
-                        if rs.path.len() >= 2 && t.saturating_sub(rs.last_enemy_spawn_time_secs) >= 2 {
-                            let first = rs.path[0];
-                            let speed = 1.0 + 0.002 * (t as f64);
-                            let hp = 5 + (t / 10) as u32;
-                            let e = Enemy {
-                                x: first.x as f64 + 0.5,
-                                y: first.y as f64 + 0.5,
-                                speed_tps: speed,
-                                hp,
-                                spawned_at: t,
-                                path_index: 1,
-                            };
-                            rs.enemies.push(e);
-                            clog(&format!("enemy spawned at t={} speed={:.3} hp={} start=({}, {})", t, speed, hp, first.x, first.y));
-                            rs.last_enemy_spawn_time_secs = t;
-                        }
-                        // Advance enemies along path
-                        if !rs.path.is_empty() {
-                            let mut survivors: Vec<Enemy> = Vec::with_capacity(rs.enemies.len());
-                            for mut e in rs.enemies.into_iter() {
-                                let mut remaining = 0.016 * e.speed_tps; // tiles per frame
-                                while remaining > 0.0 && e.path_index < rs.path.len() {
-                                    let wp = rs.path[e.path_index];
-                                    let tx = wp.x as f64 + 0.5;
-                                    let ty = wp.y as f64 + 0.5;
-                                    let dx = tx - e.x;
-                                    let dy = ty - e.y;
-                                    let dist = (dx*dx + dy*dy).sqrt();
-                                    if dist < 1e-6 {
-                                        e.path_index += 1;
-                                        continue;
-                                    }
-                                    if remaining >= dist {
-                                        e.x = tx; e.y = ty;
-                                        remaining -= dist;
-                                        e.path_index += 1;
-                                    } else {
-                                        let ratio = remaining / dist;
-                                        e.x += dx * ratio;
-                                        e.y += dy * ratio;
-                                        remaining = 0.0;
-                                    }
-                                }
-                                if e.path_index >= rs.path.len() {
-                                    // Reached Exit
-                                    let old_life = rs.life;
-                                    if rs.life > 0 { rs.life -= 1; }
-                                    clog(&format!("life: {} -> {} (enemy exited)", old_life, rs.life));
-                                    rs.stats.loops_completed = rs.stats.loops_completed.saturating_add(1);
-                                } else {
-                                    survivors.push(e);
-                                }
+                    let rs_snapshot = (*run_state).clone();
+                    if rs_snapshot.started && !rs_snapshot.is_paused {
+                        {
+                            let mut s = rs_ref.borrow_mut();
+                            if s.path.is_empty() {
+                                s.path = compute_path(&s);
                             }
-                            rs.enemies = survivors;
+                            // Spawn cadence: every 2 seconds if path is ready
+                            let t = s.stats.time_survived_secs;
+                            let path = s.path.clone();
+                            if path.len() >= 2 && t.saturating_sub(s.last_enemy_spawn_time_secs) >= 2 {
+                                let first = path[0];
+                                let speed = 1.0 + 0.002 * (t as f64);
+                                let hp = 5 + (t / 10) as u32;
+                                let e = Enemy {
+                                    x: first.x as f64 + 0.5,
+                                    y: first.y as f64 + 0.5,
+                                    speed_tps: speed,
+                                    hp,
+                                    spawned_at: t,
+                                    path_index: 1,
+                                };
+                                s.enemies.push(e);
+                                clog(&format!("enemy spawned at t={} speed={:.3} hp={} start=({}, {})", t, speed, hp, first.x, first.y));
+                                s.last_enemy_spawn_time_secs = t;
+                            }
+                            // Advance enemies along path
+                            if !path.is_empty() {
+                                let enemies_vec = std::mem::take(&mut s.enemies);
+                                let mut survivors: Vec<Enemy> = Vec::with_capacity(enemies_vec.len());
+                                for mut e in enemies_vec.into_iter() {
+                                    let mut remaining = 0.016 * e.speed_tps; // tiles per frame
+                                    while remaining > 0.0 && e.path_index < path.len() {
+                                        let wp = path[e.path_index];
+                                        let tx = wp.x as f64 + 0.5;
+                                        let ty = wp.y as f64 + 0.5;
+                                        let dx = tx - e.x;
+                                        let dy = ty - e.y;
+                                        let dist = (dx*dx + dy*dy).sqrt();
+                                        if dist < 1e-6 {
+                                            e.path_index += 1;
+                                            continue;
+                                        }
+                                        if remaining >= dist {
+                                            e.x = tx; e.y = ty;
+                                            remaining -= dist;
+                                            e.path_index += 1;
+                                        } else {
+                                            let ratio = remaining / dist;
+                                            e.x += dx * ratio;
+                                            e.y += dy * ratio;
+                                            remaining = 0.0;
+                                        }
+                                    }
+                                    if e.path_index >= path.len() {
+                                        // Reached Exit
+                                        let old_life = s.life;
+                                        if s.life > 0 { s.life -= 1; }
+                                        clog(&format!("life: {} -> {} (enemy exited)", old_life, s.life));
+                                        s.stats.loops_completed = s.stats.loops_completed.saturating_add(1);
+                                    } else {
+                                        survivors.push(e);
+                                    }
+                                }
+                                s.enemies = survivors;
+                            }
+                            run_state.set((*s).clone());
                         }
-                        run_state.set(rs);
                         draw();
                     }
                 }) as Box<dyn FnMut()>)
@@ -567,6 +587,7 @@ fn run_view(props: &RunViewProps) -> Html {
                 let camera = camera.clone();
                 let mining = mining.clone();
                 let run_state = run_state.clone();
+                let rs_ref = rs_ref.clone();
                 let draw = draw.clone();
                 Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
                     let button = e.button();
@@ -587,10 +608,12 @@ fn run_view(props: &RunViewProps) -> Html {
                             let idx = (ty as u32 * gs.width + tx as u32) as usize;
                             if let model::TileKind::Rock { .. } = rs.tiles[idx].kind {
                                 // Start the run timer immediately on initiating mining (if not already started)
-                                let mut latest = (*run_state).clone();
-                                if !latest.started {
-                                    latest.started = true;
-                                    run_state.set(latest);
+                                {
+                                    let mut s = rs_ref.borrow_mut();
+                                    if !s.started {
+                                        s.started = true;
+                                        run_state.set((*s).clone());
+                                    }
                                 }
                                 let mut m = mining.borrow_mut();
                                 m.tile_x = tx;
@@ -906,10 +929,11 @@ fn run_view(props: &RunViewProps) -> Html {
     let pause_label_rv = if paused_ov { "Resume (Space)" } else { "Pause (Space)" };
     let toggle_pause_rv = {
         let run_state = props.run_state.clone();
+        let rs_ref = rs_ref.clone();
         Callback::from(move |_: yew::events::MouseEvent| {
-            let mut rs = (*run_state).clone();
-            rs.is_paused = !rs.is_paused;
-            run_state.set(rs);
+            let mut s = rs_ref.borrow_mut();
+            s.is_paused = !s.is_paused;
+            run_state.set((*s).clone());
         })
     };
     let to_upgrades_click = {
