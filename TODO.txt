@@ -1,0 +1,2 @@
+Dev notes for current session:
+- Fix timer not running, it is stuck in the open state and

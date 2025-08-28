@@ -1,11 +1,115 @@
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlElement};
+use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlElement, KeyboardEvent};
 use yew::prelude::*;
+use std::collections::VecDeque;
 
 mod model;
-use model::{GridSize, RunState, UpgradeState};
+use model::{GridSize, RunState, UpgradeState, Enemy};
+
+fn format_time(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{:01}:{:02}:{:02}", h, m, s)
+    } else if m > 0 {
+        format!("{:02}:{:02}", m, s)
+    } else {
+        format!("{}s", s)
+    }
+}
+
+fn clog(msg: &str) {
+    web_sys::console::log_1(&JsValue::from_str(msg));
+}
+
+fn dir_to_delta(dir: model::ArrowDir) -> (i32, i32) {
+    match dir {
+        model::ArrowDir::Up => (0, -1),
+        model::ArrowDir::Down => (0, 1),
+        model::ArrowDir::Left => (-1, 0),
+        model::ArrowDir::Right => (1, 0),
+    }
+}
+
+fn find_entrance_exit(rs: &RunState) -> Option<((i32, i32, model::ArrowDir), (i32, i32, model::ArrowDir))> {
+    let gs = rs.grid_size;
+    let mut ent: Option<(i32, i32, model::ArrowDir)> = None;
+    let mut exit: Option<(i32, i32, model::ArrowDir)> = None;
+    for y in 0..gs.height {
+        for x in 0..gs.width {
+            let idx = (y * gs.width + x) as usize;
+            if let model::TileKind::Direction { dir, role } = rs.tiles[idx].kind {
+                match role {
+                    model::DirRole::Entrance => ent = Some((x as i32, y as i32, dir)),
+                    model::DirRole::Exit => exit = Some((x as i32, y as i32, dir)),
+                }
+            }
+        }
+    }
+    match (ent, exit) {
+        (Some(e), Some(x)) => Some((e, x)),
+        _ => None,
+    }
+}
+
+fn compute_path(rs: &RunState) -> Vec<model::Position> {
+    use model::TileKind;
+    let gs = rs.grid_size;
+    let Some(((ex, ey, edir), (xx, xy, xdir))) = find_entrance_exit(rs) else {
+        return Vec::new();
+    };
+    let (edx, edy) = dir_to_delta(edir);
+    let (xdx, xdy) = dir_to_delta(xdir);
+    let sx = ex + edx; // start from cell beyond entrance arrow
+    let sy = ey + edy;
+    let tx = xx - xdx; // end at cell before exit arrow (neighbor Empty ensured)
+    let ty = xy - xdy;
+    let in_bounds = |x: i32, y: i32| x >= 0 && y >= 0 && (x as u32) < gs.width && (y as u32) < gs.height;
+    if !in_bounds(sx, sy) || !in_bounds(tx, ty) { return Vec::new(); }
+    let sidx = (sy as u32 * gs.width + sx as u32) as usize;
+    let tidx = (ty as u32 * gs.width + tx as u32) as usize;
+    let is_empty = |idx: usize| matches!(rs.tiles[idx].kind, TileKind::Empty);
+    if !is_empty(sidx) || !is_empty(tidx) { return Vec::new(); }
+
+    let mut q: VecDeque<usize> = VecDeque::new();
+    let mut visited = vec![false; (gs.width * gs.height) as usize];
+    let mut parent: Vec<Option<usize>> = vec![None; (gs.width * gs.height) as usize];
+    visited[sidx] = true;
+    q.push_back(sidx);
+    let dirs = [(1i32,0i32),(-1,0),(0,1),(0,-1)];
+    while let Some(idx) = q.pop_front() {
+        if idx == tidx { break; }
+        let x = (idx as u32 % gs.width) as i32;
+        let y = (idx as u32 / gs.width) as i32;
+        for (dx,dy) in dirs {
+            let nx = x + dx; let ny = y + dy;
+            if !in_bounds(nx, ny) { continue; }
+            let nidx = (ny as u32 * gs.width + nx as u32) as usize;
+            if visited[nidx] { continue; }
+            if !is_empty(nidx) { continue; }
+            visited[nidx] = true;
+            parent[nidx] = Some(idx);
+            q.push_back(nidx);
+        }
+    }
+    if !visited[tidx] { return Vec::new(); }
+    // reconstruct
+    let mut path_rev: Vec<usize> = Vec::new();
+    let mut cur = Some(tidx);
+    while let Some(ci) = cur {
+        path_rev.push(ci);
+        cur = parent[ci];
+    }
+    path_rev.reverse();
+    path_rev.into_iter().map(|i| {
+        let x = (i as u32 % gs.width) as u32;
+        let y = (i as u32 / gs.width) as u32;
+        model::Position { x, y }
+    }).collect()
+}
 
 #[derive(PartialEq, Clone)]
 enum View {
@@ -16,6 +120,7 @@ enum View {
 #[derive(Properties, PartialEq, Clone)]
 struct RunViewProps {
     pub run_state: UseStateHandle<RunState>,
+    pub to_upgrades: Callback<()>,
 }
 
 #[function_component(RunView)]
@@ -65,6 +170,34 @@ fn run_view(props: &RunViewProps) -> Html {
 
             compute_and_apply_canvas_size();
 
+            // Initial centering to match the Center button behavior
+            {
+                let mut cam = camera.borrow_mut();
+                if !cam.initialized {
+                    let rs = (*run_state).clone();
+                    let gs = rs.grid_size;
+                    let tile_px = 32.0;
+                    let scale_px = cam.zoom * tile_px;
+                    let w = canvas.width() as f64;
+                    let h = canvas.height() as f64;
+                    // Find Start tile position; fallback to grid center if not found
+                    let mut sx = (gs.width / 2) as u32;
+                    let mut sy = (gs.height / 2) as u32;
+                    for (i, t) in rs.tiles.iter().enumerate() {
+                        if let model::TileKind::Start = t.kind {
+                            sx = (i as u32) % gs.width;
+                            sy = (i as u32) / gs.width;
+                            break;
+                        }
+                    }
+                    let cx = sx as f64 + 0.5;
+                    let cy = sy as f64 + 0.5;
+                    cam.offset_x = w * 0.5 - scale_px * cx;
+                    cam.offset_y = h * 0.5 - scale_px * cy;
+                    cam.initialized = true;
+                }
+            }
+
             let draw = {
                 let canvas = canvas.clone();
                 let camera = camera.clone();
@@ -97,27 +230,6 @@ fn run_view(props: &RunViewProps) -> Html {
                     ctx.set_fill_style(&JsValue::from_str("#161b22"));
                     ctx.fill_rect(0.0, 0.0, gs.width as f64, gs.height as f64);
 
-                    // Draw tiles
-                    let rock_fill = JsValue::from_str("#1d2430");
-                    let rock_border = JsValue::from_str("#3a4455");
-                    let margin = 0.1f64;
-                    for y in 0..gs.height {
-                        for x in 0..gs.width {
-                            let idx = (y * gs.width + x) as usize;
-                            if let model::TileKind::Rock { .. } = rs.tiles[idx].kind {
-                                let rx = x as f64 + margin;
-                                let ry = y as f64 + margin;
-                                let rw = 1.0 - 2.0 * margin;
-                                let rh = 1.0 - 2.0 * margin;
-                                ctx.set_fill_style(&rock_fill);
-                                ctx.fill_rect(rx, ry, rw, rh);
-                                ctx.set_stroke_style(&rock_border);
-                                ctx.set_line_width((1.0 / scale_px).max(0.001));
-                                ctx.stroke_rect(rx, ry, rw, rh);
-                            }
-                        }
-                    }
-
                     // Grid lines
                     ctx.set_stroke_style(&JsValue::from_str("#2f3641"));
                     let line_w = (1.0 / scale_px).max(0.001);
@@ -135,7 +247,123 @@ fn run_view(props: &RunViewProps) -> Html {
                         ctx.stroke();
                     }
 
-                    // Mining progress overlay
+                    // Draw tiles and special markers
+                    let margin = 0.1f64;
+                    for y in 0..gs.height {
+                        for x in 0..gs.width {
+                            let idx = (y * gs.width + x) as usize;
+                            match rs.tiles[idx].kind {
+                                model::TileKind::Rock { has_gold, boost } => {
+                                    let rx = x as f64 + margin;
+                                    let ry = y as f64 + margin;
+                                    let rw = 1.0 - 2.0 * margin;
+                                    let rh = 1.0 - 2.0 * margin;
+                                    let fill = if has_gold {
+                                        "#4d3b1f"
+                                    } else {
+                                        match boost {
+                                            Some(model::BoostKind::Slow) => "#203a5a",
+                                            Some(model::BoostKind::Damage) => "#5a2320",
+                                            _ => "#1d2430",
+                                        }
+                                    };
+                                    ctx.set_fill_style(&JsValue::from_str(fill));
+                                    ctx.fill_rect(rx, ry, rw, rh);
+                                    ctx.set_stroke_style(&JsValue::from_str("#3a4455"));
+                                    ctx.set_line_width((1.0 / scale_px).max(0.001));
+                                    ctx.stroke_rect(rx, ry, rw, rh);
+                                }
+                                model::TileKind::Start => {
+                                    // Fill as Path to keep uniform look
+                                    let rx = x as f64;
+                                    let ry = y as f64;
+                                    ctx.set_fill_style(&JsValue::from_str("#121721"));
+                                    ctx.fill_rect(rx, ry, 1.0, 1.0);
+                                    // Draw a blue circle at center
+                                    let cx = x as f64 + 0.5;
+                                    let cy = y as f64 + 0.5;
+                                    let r = 0.35;
+                                    ctx.begin_path();
+                                    ctx.set_fill_style(&JsValue::from_str("#58a6ff"));
+                                    ctx.arc(cx, cy, r, 0.0, std::f64::consts::PI * 2.0).ok();
+                                    ctx.fill();
+                                    ctx.set_stroke_style(&JsValue::from_str("#1f6feb"));
+                                    ctx.set_line_width((1.0 / scale_px).max(0.001));
+                                    ctx.stroke();
+                                }
+                                model::TileKind::Direction { dir, role } => {
+                                    // Fill as Path to keep uniform look
+                                    let rx = x as f64;
+                                    let ry = y as f64;
+                                    ctx.set_fill_style(&JsValue::from_str("#121721"));
+                                    ctx.fill_rect(rx, ry, 1.0, 1.0);
+                                    // Draw an oriented arrow triangle on top
+                                    let color = match role {
+                                        model::DirRole::Entrance => "#2ea043", // green
+                                        model::DirRole::Exit => "#f0883e",     // orange
+                                    };
+                                    ctx.set_fill_style(&JsValue::from_str(color));
+                                    ctx.begin_path();
+                                    match dir {
+                                        model::ArrowDir::Right => {
+                                            ctx.move_to(x as f64 + 0.2, y as f64 + 0.2);
+                                            ctx.line_to(x as f64 + 0.2, y as f64 + 0.8);
+                                            ctx.line_to(x as f64 + 0.8, y as f64 + 0.5);
+                                        }
+                                        model::ArrowDir::Left => {
+                                            ctx.move_to(x as f64 + 0.8, y as f64 + 0.2);
+                                            ctx.line_to(x as f64 + 0.8, y as f64 + 0.8);
+                                            ctx.line_to(x as f64 + 0.2, y as f64 + 0.5);
+                                        }
+                                        model::ArrowDir::Up => {
+                                            ctx.move_to(x as f64 + 0.2, y as f64 + 0.8);
+                                            ctx.line_to(x as f64 + 0.8, y as f64 + 0.8);
+                                            ctx.line_to(x as f64 + 0.5, y as f64 + 0.2);
+                                        }
+                                        model::ArrowDir::Down => {
+                                            ctx.move_to(x as f64 + 0.2, y as f64 + 0.2);
+                                            ctx.line_to(x as f64 + 0.8, y as f64 + 0.2);
+                                            ctx.line_to(x as f64 + 0.5, y as f64 + 0.8);
+                                        }
+                                    }
+                                    ctx.close_path();
+                                    ctx.fill();
+                                }
+                                model::TileKind::Indestructible => {
+                                    let rx = x as f64 + margin;
+                                    let ry = y as f64 + margin;
+                                    let rw = 1.0 - 2.0 * margin;
+                                    let rh = 1.0 - 2.0 * margin;
+                                    ctx.set_fill_style(&JsValue::from_str("#3c4454"));
+                                    ctx.fill_rect(rx, ry, rw, rh);
+                                    ctx.set_stroke_style(&JsValue::from_str("#596273"));
+                                    ctx.set_line_width((1.0 / scale_px).max(0.001));
+                                    ctx.stroke_rect(rx, ry, rw, rh);
+                                }
+                                model::TileKind::Empty => {
+                                    let rx = x as f64;
+                                    let ry = y as f64;
+                                    let rw = 1.0;
+                                    let rh = 1.0;
+                                    ctx.set_fill_style(&JsValue::from_str("#121721"));
+                                    ctx.fill_rect(rx, ry, rw, rh);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Draw enemies
+                    ctx.set_line_width((1.0 / scale_px).max(0.001));
+                    for e in &rs.enemies {
+                        ctx.begin_path();
+                        ctx.set_fill_style(&JsValue::from_str("#d73a49"));
+                        ctx.arc(e.x, e.y, 0.22, 0.0, std::f64::consts::PI * 2.0).ok();
+                        ctx.fill();
+                        ctx.set_stroke_style(&JsValue::from_str("#b62324"));
+                        ctx.stroke();
+                    }
+
                     let m = mining.borrow();
                     if m.active && m.mouse_down {
                         if m.tile_x >= 0 && m.tile_y >= 0 && (m.tile_x as u32) < gs.width && (m.tile_y as u32) < gs.height {
@@ -150,6 +378,16 @@ fn run_view(props: &RunViewProps) -> Html {
                 }
             };
 
+            // Seed initial path before first draw
+            {
+                let rs0 = (*run_state).clone();
+                if rs0.path.is_empty() {
+                    let mut rs2 = rs0.clone();
+                    rs2.path = compute_path(&rs0);
+                    run_state.set(rs2);
+                }
+            }
+
             draw();
 
             // Mining tick (~60 FPS)
@@ -162,6 +400,7 @@ fn run_view(props: &RunViewProps) -> Html {
                     if !m.active || !m.mouse_down { return; }
                     // Bounds check and tile kind check
                     let rs = (*run_state).clone();
+                    if rs.is_paused { return; }
                     let gs = rs.grid_size;
                     if m.tile_x < 0 || m.tile_y < 0 || (m.tile_x as u32) >= gs.width || (m.tile_y as u32) >= gs.height {
                         m.active = false;
@@ -175,14 +414,24 @@ fn run_view(props: &RunViewProps) -> Html {
                         if m.progress >= 1.0 {
                             drop(m);
                             // complete mining
-                            let mut rs2 = rs.clone();
-                            if let model::TileKind::Rock { has_gold, .. } = rs2.tiles[idx].kind.clone() {
-                                rs2.tiles[idx].kind = model::TileKind::Empty;
-                                rs2.stats.blocks_mined = rs2.stats.blocks_mined.saturating_add(1);
-                                rs2.currencies.tile_credits = rs2.currencies.tile_credits.saturating_add(1);
-                                if has_gold { rs2.currencies.gold = rs2.currencies.gold.saturating_add(1); }
+                            let mut latest = (*run_state).clone();
+                            let mut grant_gold = false;
+                            if let model::TileKind::Rock { has_gold, .. } = latest.tiles[idx].kind.clone() {
+                                latest.tiles[idx].kind = model::TileKind::Empty;
+                                latest.stats.blocks_mined = latest.stats.blocks_mined.saturating_add(1);
+                                latest.currencies.tile_credits = latest.currencies.tile_credits.saturating_add(1);
+                                grant_gold = has_gold;
                             }
-                            run_state.set(rs2);
+                            if grant_gold {
+                                latest.currencies.gold = latest.currencies.gold.saturating_add(1);
+                                let gs2 = latest.grid_size;
+                                let tx = (idx as u32) % gs2.width;
+                                let ty = (idx as u32) / gs2.width;
+                                clog(&format!("gold +1 -> {} (mined @{}, {})", latest.currencies.gold, tx, ty));
+                            }
+                            // Recompute path after terrain change
+                            latest.path = compute_path(&latest);
+                            run_state.set(latest);
                             let mut m2 = mining.borrow_mut();
                             m2.active = false;
                             m2.mouse_down = false;
@@ -191,6 +440,13 @@ fn run_view(props: &RunViewProps) -> Html {
                             drop(m2);
                             draw();
                             return;
+                        } else {
+                            // ensure timer starts on first mining progress (use latest state to avoid overwriting other fields)
+                            let mut latest2 = (*run_state).clone();
+                            if !latest2.started {
+                                latest2.started = true;
+                                run_state.set(latest2);
+                            }
                         }
                         drop(m);
                         draw();
@@ -203,6 +459,82 @@ fn run_view(props: &RunViewProps) -> Html {
                 .set_interval_with_callback_and_timeout_and_arguments_0(mining_tick.as_ref().unchecked_ref(), 16)
                 .unwrap();
 
+            // Simulation tick (~60 FPS) for enemies
+            let sim_tick = {
+                let run_state = run_state.clone();
+                let draw = draw.clone();
+                Closure::wrap(Box::new(move || {
+                    let mut rs = (*run_state).clone();
+                    if rs.started && !rs.is_paused {
+                        if rs.path.is_empty() {
+                            rs.path = compute_path(&rs);
+                        }
+                        // Spawn cadence: every 2 seconds if path is ready
+                        let t = rs.stats.time_survived_secs;
+                        if rs.path.len() >= 2 && t.saturating_sub(rs.last_enemy_spawn_time_secs) >= 2 {
+                            let first = rs.path[0];
+                            let speed = 1.0 + 0.002 * (t as f64);
+                            let hp = 5 + (t / 10) as u32;
+                            let e = Enemy {
+                                x: first.x as f64 + 0.5,
+                                y: first.y as f64 + 0.5,
+                                speed_tps: speed,
+                                hp,
+                                spawned_at: t,
+                                path_index: 1,
+                            };
+                            rs.enemies.push(e);
+                            clog(&format!("enemy spawned at t={} speed={:.3} hp={} start=({}, {})", t, speed, hp, first.x, first.y));
+                            rs.last_enemy_spawn_time_secs = t;
+                        }
+                        // Advance enemies along path
+                        if !rs.path.is_empty() {
+                            let mut survivors: Vec<Enemy> = Vec::with_capacity(rs.enemies.len());
+                            for mut e in rs.enemies.into_iter() {
+                                let mut remaining = 0.016 * e.speed_tps; // tiles per frame
+                                while remaining > 0.0 && e.path_index < rs.path.len() {
+                                    let wp = rs.path[e.path_index];
+                                    let tx = wp.x as f64 + 0.5;
+                                    let ty = wp.y as f64 + 0.5;
+                                    let dx = tx - e.x;
+                                    let dy = ty - e.y;
+                                    let dist = (dx*dx + dy*dy).sqrt();
+                                    if dist < 1e-6 {
+                                        e.path_index += 1;
+                                        continue;
+                                    }
+                                    if remaining >= dist {
+                                        e.x = tx; e.y = ty;
+                                        remaining -= dist;
+                                        e.path_index += 1;
+                                    } else {
+                                        let ratio = remaining / dist;
+                                        e.x += dx * ratio;
+                                        e.y += dy * ratio;
+                                        remaining = 0.0;
+                                    }
+                                }
+                                if e.path_index >= rs.path.len() {
+                                    // Reached Exit
+                                    let old_life = rs.life;
+                                    if rs.life > 0 { rs.life -= 1; }
+                                    clog(&format!("life: {} -> {} (enemy exited)", old_life, rs.life));
+                                    rs.stats.loops_completed = rs.stats.loops_completed.saturating_add(1);
+                                } else {
+                                    survivors.push(e);
+                                }
+                            }
+                            rs.enemies = survivors;
+                        }
+                        run_state.set(rs);
+                        draw();
+                    }
+                }) as Box<dyn FnMut()>)
+            };
+            let sim_tick_id = window
+                .set_interval_with_callback_and_timeout_and_arguments_0(sim_tick.as_ref().unchecked_ref(), 16)
+                .unwrap();
+
             // Wheel (zoom)
             let wheel_cb = {
                 let camera = camera.clone();
@@ -210,9 +542,18 @@ fn run_view(props: &RunViewProps) -> Html {
                 Closure::wrap(Box::new(move |e: web_sys::WheelEvent| {
                     e.prevent_default();
                     let mut cam = camera.borrow_mut();
+                    let tile_px = 32.0;
+                    let canvas_x = e.offset_x() as f64;
+                    let canvas_y = e.offset_y() as f64;
+                    let old_scale = cam.zoom * tile_px;
+                    let world_x = (canvas_x - cam.offset_x) / old_scale;
+                    let world_y = (canvas_y - cam.offset_y) / old_scale;
                     let delta = e.delta_y();
                     let zoom_change = (-delta * 0.001).exp();
                     cam.zoom = (cam.zoom * zoom_change).clamp(0.2, 5.0);
+                    let new_scale = cam.zoom * tile_px;
+                    cam.offset_x = canvas_x - world_x * new_scale;
+                    cam.offset_y = canvas_y - world_y * new_scale;
                     drop(cam);
                     draw();
                 }) as Box<dyn FnMut(_)> )
@@ -238,12 +579,19 @@ fn run_view(props: &RunViewProps) -> Html {
                         let world_y = ((e.offset_y() as f64) - cam.offset_y) / scale_px;
                         drop(cam);
                         let rs = (*run_state).clone();
+                        if rs.is_paused { return; }
                         let gs = rs.grid_size;
                         let tx = world_x.floor() as i32;
                         let ty = world_y.floor() as i32;
                         if tx >= 0 && ty >= 0 && (tx as u32) < gs.width && (ty as u32) < gs.height {
                             let idx = (ty as u32 * gs.width + tx as u32) as usize;
                             if let model::TileKind::Rock { .. } = rs.tiles[idx].kind {
+                                // Start the run timer immediately on initiating mining (if not already started)
+                                let mut latest = (*run_state).clone();
+                                if !latest.started {
+                                    latest.started = true;
+                                    run_state.set(latest);
+                                }
                                 let mut m = mining.borrow_mut();
                                 m.tile_x = tx;
                                 m.tile_y = ty;
@@ -300,6 +648,14 @@ fn run_view(props: &RunViewProps) -> Html {
                         let mut m = mining.borrow_mut();
                         if m.mouse_down {
                             let rs = (*run_state).clone();
+                            if rs.is_paused {
+                                m.active = false;
+                                m.progress = 0.0;
+                                m.elapsed_secs = 0.0;
+                                drop(m);
+                                draw();
+                                return;
+                            }
                             let gs = rs.grid_size;
                             let tx = world_x.floor() as i32;
                             let ty = world_y.floor() as i32;
@@ -412,7 +768,9 @@ fn run_view(props: &RunViewProps) -> Html {
                     resize_cb.as_ref().unchecked_ref(),
                 );
                 let _ = window.clear_interval_with_handle(mining_tick_id);
+                let _ = window.clear_interval_with_handle(sim_tick_id);
                 drop(mining_tick);
+                drop(sim_tick);
                 drop(wheel_cb);
                 drop(mousedown_cb);
                 drop(mousemove_cb);
@@ -423,7 +781,193 @@ fn run_view(props: &RunViewProps) -> Html {
         });
     }
 
-    html! { <canvas ref={canvas_ref} id="game-canvas" style="display:block; width:100vw; height:calc(100vh - 48px);"></canvas> }
+    // Overlay controls (camera) and legend panels
+    let zoom_in = {
+        let camera = camera.clone();
+        let canvas_ref = canvas_ref.clone();
+        Callback::from(move |_| {
+            if let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() {
+                let mut cam = camera.borrow_mut();
+                let tile_px = 32.0;
+                let w = canvas.width() as f64;
+                let h = canvas.height() as f64;
+                let cx = w * 0.5;
+                let cy = h * 0.5;
+                let old_scale = cam.zoom * tile_px;
+                let world_x = (cx - cam.offset_x) / old_scale;
+                let world_y = (cy - cam.offset_y) / old_scale;
+                cam.zoom = (cam.zoom * 1.25).clamp(0.2, 5.0);
+                let new_scale = cam.zoom * tile_px;
+                cam.offset_x = cx - world_x * new_scale;
+                cam.offset_y = cy - world_y * new_scale;
+            }
+            let _ = web_sys::window().unwrap().dispatch_event(&web_sys::Event::new("resize").unwrap());
+        })
+    };
+    let zoom_out = {
+        let camera = camera.clone();
+        let canvas_ref = canvas_ref.clone();
+        Callback::from(move |_| {
+            if let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() {
+                let mut cam = camera.borrow_mut();
+                let tile_px = 32.0;
+                let w = canvas.width() as f64;
+                let h = canvas.height() as f64;
+                let cx = w * 0.5;
+                let cy = h * 0.5;
+                let old_scale = cam.zoom * tile_px;
+                let world_x = (cx - cam.offset_x) / old_scale;
+                let world_y = (cy - cam.offset_y) / old_scale;
+                cam.zoom = (cam.zoom * 0.8).clamp(0.2, 5.0);
+                let new_scale = cam.zoom * tile_px;
+                cam.offset_x = cx - world_x * new_scale;
+                cam.offset_y = cy - world_y * new_scale;
+            }
+            let _ = web_sys::window().unwrap().dispatch_event(&web_sys::Event::new("resize").unwrap());
+        })
+    };
+    let pan_by = |dx: f64, dy: f64| {
+        let camera = camera.clone();
+        Callback::from(move |_| {
+            let mut cam = camera.borrow_mut();
+            cam.offset_x += dx;
+            cam.offset_y += dy;
+            drop(cam);
+            let _ = web_sys::window().unwrap().dispatch_event(&web_sys::Event::new("resize").unwrap());
+        })
+    };
+    let center_on_start = {
+        let camera = camera.clone();
+        let canvas_ref = canvas_ref.clone();
+        let run_state = props.run_state.clone();
+        Callback::from(move |_| {
+            if let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() {
+                let w = canvas.width() as f64;
+                let h = canvas.height() as f64;
+                let rs = (*run_state).clone();
+                let gs = rs.grid_size;
+                let mut cam = camera.borrow_mut();
+                let tile_px = 32.0;
+                let scale_px = cam.zoom * tile_px;
+                // find Start tile; fallback to grid center
+                let mut sx = (gs.width / 2) as u32;
+                let mut sy = (gs.height / 2) as u32;
+                for (i, t) in rs.tiles.iter().enumerate() {
+                    if let model::TileKind::Start = t.kind {
+                        sx = (i as u32) % gs.width;
+                        sy = (i as u32) / gs.width;
+                        break;
+                    }
+                }
+                let cx = sx as f64 + 0.5;
+                let cy = sy as f64 + 0.5;
+                cam.offset_x = w * 0.5 - scale_px * cx;
+                cam.offset_y = h * 0.5 - scale_px * cy;
+                drop(cam);
+                let _ = web_sys::window().unwrap().dispatch_event(&web_sys::Event::new("resize").unwrap());
+            }
+        })
+    };
+
+    // Legend presence computation
+    let rs_snapshot = (*props.run_state).clone();
+    let mut has_basic = false;
+    let mut has_gold = false;
+    let mut has_empty = false;
+    let mut has_start = false;
+    let mut has_entrance = false;
+    let mut has_exit = false;
+    let mut has_indestructible = false;
+    for t in &rs_snapshot.tiles {
+        match &t.kind {
+            model::TileKind::Rock { has_gold: hg, .. } => {
+                if *hg { has_gold = true; } else { has_basic = true; }
+            }
+            model::TileKind::Empty => has_empty = true,
+            model::TileKind::Start => has_start = true,
+            model::TileKind::Direction { role, .. } => {
+                match role {
+                    model::DirRole::Entrance => has_entrance = true,
+                    model::DirRole::Exit => has_exit = true,
+                }
+            }
+            model::TileKind::Indestructible => has_indestructible = true,
+            _ => {}
+        }
+    }
+
+    // HUD overlay values and callbacks
+    let rs_overlay = (*props.run_state).clone();
+    let gold_ov = rs_overlay.currencies.gold;
+    let research_ov = rs_overlay.currencies.research;
+    let life_ov = rs_overlay.life;
+    let time_ov = rs_overlay.stats.time_survived_secs;
+    let paused_ov = rs_overlay.is_paused;
+    let pause_label_rv = if paused_ov { "Resume (Space)" } else { "Pause (Space)" };
+    let toggle_pause_rv = {
+        let run_state = props.run_state.clone();
+        Callback::from(move |_: yew::events::MouseEvent| {
+            let mut rs = (*run_state).clone();
+            rs.is_paused = !rs.is_paused;
+            run_state.set(rs);
+        })
+    };
+    let to_upgrades_click = {
+        let cb = props.to_upgrades.clone();
+        Callback::from(move |_: yew::events::MouseEvent| cb.emit(()))
+    };
+
+    html! {
+        <div style="position:relative; width:100vw; height:100vh;">
+            <canvas ref={canvas_ref.clone()} id="game-canvas" style="display:block; width:100%; height:100%;"></canvas>
+            <div style="position:absolute; top:12px; left:50%; transform:translateX(-50%); font-size:20px; font-weight:600;">
+                { format_time(time_ov) }
+            </div>
+            <div style="position:absolute; top:12px; left:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:180px; display:flex; flex-direction:column; gap:6px;">
+                <div>{ format!("Gold: {}", gold_ov) }</div>
+                <div>{ format!("Life: {}", life_ov) }</div>
+                <div>{ format!("Research: {}", research_ov) }</div>
+            </div>
+            <div style="position:absolute; top:12px; right:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:180px; display:flex; flex-direction:column; gap:6px;">
+                <button onclick={toggle_pause_rv.clone()}>{ pause_label_rv }</button>
+                <button onclick={to_upgrades_click.clone()}>{"Upgrades"}</button>
+            </div>
+            <div style="position:absolute; left:12px; bottom:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; display:flex; gap:6px; align-items:center;">
+                <button onclick={zoom_out.clone()}>{"-"}</button>
+                <button onclick={zoom_in.clone()}>{"+"}</button>
+                <span style="width:8px;"></span>
+                <button onclick={pan_by(-64.0, 0.0)}>{"←"}</button>
+                <button onclick={pan_by(0.0, -64.0)}>{"↑"}</button>
+                <button onclick={pan_by(0.0, 64.0)}>{"↓"}</button>
+                <button onclick={pan_by(64.0, 0.0)}>{"→"}</button>
+                <span style="width:8px;"></span>
+                <button onclick={center_on_start.clone()}>{"Center"}</button>
+            </div>
+            <div style="position:absolute; right:12px; bottom:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:160px;">
+                <div style="font-weight:600; margin-bottom:6px;">{"Legend"}</div>
+                { if has_start { html!{ <LegendRow color="#58a6ff" label="Start" /> } } else { html!{} } }
+                { if has_entrance { html!{ <LegendRow color="#2ea043" label="Entrance" /> } } else { html!{} } }
+                { if has_exit { html!{ <LegendRow color="#f0883e" label="Exit" /> } } else { html!{} } }
+                { if has_indestructible { html!{ <LegendRow color="#3c4454" label="Indestructible" /> } } else { html!{} } }
+                { if has_basic { html!{ <LegendRow color="#1d2430" label="Rock" /> } } else { html!{} } }
+                { if has_gold { html!{ <LegendRow color="#4d3b1f" label="Gold Rock" /> } } else { html!{} } }
+                { if has_empty { html!{ <LegendRow color="#121721" label="Path" /> } } else { html!{} } }
+            </div>
+        </div>
+    }
+}
+
+#[derive(Properties, PartialEq, Clone)]
+struct LegendRowProps { pub color: &'static str, pub label: &'static str }
+
+#[function_component(LegendRow)]
+fn legend_row(props: &LegendRowProps) -> Html {
+    html!{
+        <div style="display:flex; align-items:center; gap:8px; margin:3px 0;">
+            <span style={format!("display:inline-block; width:12px; height:12px; background:{}; border:1px solid #30363d; border-radius:2px;", props.color)}></span>
+            <span>{ props.label }</span>
+        </div>
+    }
 }
 
 struct Camera {
@@ -433,6 +977,7 @@ struct Camera {
     panning: bool,
     last_x: f64,
     last_y: f64,
+    initialized: bool,
 }
 
 impl Default for Camera {
@@ -444,6 +989,7 @@ impl Default for Camera {
             panning: false,
             last_x: 0.0,
             last_y: 0.0,
+            initialized: false,
         }
     }
 }
@@ -466,16 +1012,25 @@ fn app() -> Html {
     // Game/meta state
     let run_state = use_state(|| RunState::new_basic(GridSize { width: 25, height: 25 }));
     let _upgrade_state = use_state(|| UpgradeState { tower_refund_rate_percent: 100, ..Default::default() });
+        let last_resources = use_mut_ref(|| (0u64, 0u64, 0u32)); // (gold, research, life)
 
     // Ticker for run time
     {
         let run_state = run_state.clone();
         use_effect_with((), move |_| {
             let window = web_sys::window().unwrap();
+            let run_state2 = run_state.clone();
             let tick = Closure::wrap(Box::new(move || {
-                let mut rs = (*run_state).clone();
-                rs.stats.time_survived_secs = rs.stats.time_survived_secs.saturating_add(1);
-                run_state.set(rs);
+                let mut latest = (*run_state2).clone();
+                if latest.started && !latest.is_paused {
+                    latest.stats.time_survived_secs = latest.stats.time_survived_secs.saturating_add(1);
+                    clog(&format!("time tick: {}", latest.stats.time_survived_secs));
+                    run_state2.set(latest);
+                } else if latest.started && latest.is_paused {
+                    clog(&format!("time paused at {}", latest.stats.time_survived_secs));
+                } else {
+                    clog("time idle (not started)");
+                }
             }) as Box<dyn FnMut()>);
             let id = window
                 .set_interval_with_callback_and_timeout_and_arguments_0(
@@ -483,10 +1038,42 @@ fn app() -> Html {
                     1000,
                 )
                 .unwrap();
+            // Spacebar pause/resume hotkey
+            let key_cb = {
+                let run_state = run_state.clone();
+                Closure::wrap(Box::new(move |e: KeyboardEvent| {
+                    if e.code() == "Space" {
+                        e.prevent_default();
+                        let mut rs = (*run_state).clone();
+                        rs.is_paused = !rs.is_paused;
+                        run_state.set(rs);
+                    }
+                }) as Box<dyn FnMut(_)> )
+            };
+            window
+                .add_event_listener_with_callback("keydown", key_cb.as_ref().unchecked_ref())
+                .unwrap();
             move || {
                 let _ = window.clear_interval_with_handle(id);
+                let _ = window.remove_event_listener_with_callback("keydown", key_cb.as_ref().unchecked_ref());
+                drop(key_cb);
                 drop(tick);
             }
+        });
+    }
+
+    // Log resource changes: gold, research, life
+    {
+        let run_state = run_state.clone();
+        let last_resources = last_resources.clone();
+        use_effect_with(((*run_state).currencies.gold, (*run_state).currencies.research, (*run_state).life), move |deps| {
+            let (g, r, l) = *deps;
+            let mut prev = last_resources.borrow_mut();
+            if prev.0 != g { clog(&format!("gold: {} -> {}", prev.0, g)); }
+            if prev.1 != r { clog(&format!("research: {} -> {}", prev.1, r)); }
+            if prev.2 != l { clog(&format!("life: {} -> {}", prev.2, l)); }
+            *prev = (g, r, l);
+            || ()
         });
     }
 
@@ -499,28 +1086,21 @@ fn app() -> Html {
         Callback::from(move |_| view.set(View::Upgrades))
     };
 
-    let gold = (*run_state).currencies.gold;
-    let research = (*run_state).currencies.research;
-    let life = (*run_state).life;
-    let time = (*run_state).stats.time_survived_secs;
 
     html! {
         <div id="root">
-            <div id="top-bar" class="nav" style="padding: 8px 12px; display: flex; align-items: center; gap: 8px;">
-                <button onclick={to_run.clone()}>{"Run"}</button>
-                <button onclick={to_upgrades.clone()}>{"Upgrades"}</button>
-                <span style="margin-left: 16px;">{format!("Gold: {}", gold)}</span>
-                <span style="margin-left: 12px;">{format!("Life: {}", life)}</span>
-                <span style="margin-left: 12px;">{format!("Research: {}", research)}</span>
-                <span style="margin-left: 12px;">{format!("Time: {}s", time)}</span>
-            </div>
             {
                 match (*view).clone() {
-                    View::Run => html! { <RunView run_state={run_state.clone()} /> },
+                    View::Run => html! { <RunView run_state={run_state.clone()} to_upgrades={to_upgrades.clone()} /> },
                     View::Upgrades => html! {
-                        <div id="upgrades-view" style="padding: 12px;">
-                            <h2>{"Upgrades"}</h2>
-                            <p>{"Spend research to improve mining speed, starting gold, tower stats, etc. (coming soon)"}</p>
+                        <div style="position:relative; width:100vw; height:100vh;">
+                            <div id="upgrades-view" style="padding: 12px;">
+                                <h2>{"Upgrades"}</h2>
+                                <p>{"Spend research to improve mining speed, starting gold, tower stats, etc. (coming soon)"}</p>
+                            </div>
+                            <div style="position:absolute; top:12px; right:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px;">
+                                <button onclick={to_run.clone()}>{"Back to Run"}</button>
+                            </div>
                         </div>
                     }
                 }

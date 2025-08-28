@@ -19,7 +19,7 @@ Goals:
 ## Key Mechanics
 ### Grid and Pathing
 - Grid-based map.
-- Initial setup: a short loop in the middle; enemies spawn at Start and attempt to loop back to End (completing a lap damages the player/"base").
+- Initial setup: a short loop near the center (with a slight random offset and randomized entrance/exit orientation); enemies spawn at Start and attempt to loop back to End (completing a lap damages the player/"base").
 - Players place walls/tiles to modify enemy pathing. It is not permitted to completely block the path; pathfinding must always have at least one valid route from Start to End.
 - Pathfinding: A* or BFS on a 4-connected grid is sufficient. For MVP, we can run pathfinding whenever terrain changes (placement/mining).
 
@@ -55,7 +55,7 @@ Goals:
   - Reset run currencies (gold) and transient state.
 
 ## UI/UX (Initial)
-- Top Bar: Resources (Gold, Research snapshot), Run time, Loops completed, Health.
+- HUD overlays: Time in the top-center (no label), Resources (Gold, Life, Research) stacked in the top-left; menu buttons (Pause/Resume, Upgrades) stacked in the top-right.
 - Center: Game Grid rendered to a canvas; shows enemies, towers, tiles.
 - Right Panel: Build menu (towers, walls), tile info/boosts, mining interaction.
 - Bottom: Controls (Start/Pause, Speed, End Run).
@@ -65,6 +65,11 @@ Goals:
 - Zoom: Mouse wheel.
 - Pan: Middle or Right mouse drag. Right-click context menu is disabled on the canvas.
 - Mine: Left mouse button hold on a Rock tile. A progress bar fills inside the tile; moving the cursor off the tile resets progress. On completion the tile becomes Empty and may award gold.
+- Pause: Spacebar or the Pause/Resume button in the top-right HUD panel. While paused, the run timer stops and mining is disabled, but you can still pan/zoom to plan. The timer starts automatically on the first mining action.
+- On-screen camera controls: bottom-left overlay with Zoom −/+, pan arrows (←↑↓→), and a Center button to re-center on Start. These work while paused.
+- Legend: Bottom-right overlay shows only the tile types currently present on the board (Start, Entrance/Exit, Indestructible, Rock, Gold, Empty).
+- Tile generation (MVP): Rock vs. Gold is randomized; boost tiles are disabled initially and will unlock later. Gold yield per gold tile is a placeholder value and will scale with upgrades.
+- Enemies (MVP): Once the run starts (first mining), enemies spawn near the Entrance every ~2s and follow the current Path to the Exit. Each enemy’s speed and HP are set when it spawns based on elapsed run time and do not change afterwards.
 
 ## MVP Scope
 - Static grid with initial small loop and Start/End.
@@ -84,7 +89,16 @@ Goals:
 
 ## Data Model (Initial Draft)
 - Position { x, y }, GridSize { width, height }
-- TileKind: Empty | Rock { has_gold, boost? } | Wall | Start | End
+- TileKind: Empty | Rock { has_gold, boost? } | Wall | Start | End | Direction { dir, role } | Indestructible
+  - Direction: a non-interactive tile placed one tile away from Start on two sides to mark the initial maze entrance and exit.
+    - dir: Up | Down | Left | Right, indicating arrow direction.
+    - role: Entrance | Exit (Entrance arrow points away from Start; Exit arrow points towards Start).
+  - Indestructible: non-interactive, unmineable tiles used to enforce a clear entrance/exit.
+  - Rock variants for visuals/effects:
+    - basic (no boost),
+    - gold (has_gold=true, grants gold when mined),
+    - cold (boost=Slow),
+    - fire (boost=Damage).
 - BoostKind: Range | Damage | FireRate | Slow
 - Currencies: gold, research, tile_credits
 - RunStats: time_survived_secs, loops_completed, blocks_mined

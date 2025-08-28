@@ -16,6 +16,8 @@ web-sys = { version = "0.3", features = [
     "CanvasRenderingContext2d",
     "MouseEvent",
     "WheelEvent",
+    "KeyboardEvent",
     "console"
 ] }
 serde = { version = "1", features = ["derive"] }
+js-sys = "0.3"
