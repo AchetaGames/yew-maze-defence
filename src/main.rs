@@ -222,7 +222,7 @@ fn run_view(props: &RunViewProps) -> Html {
                     let w = canvas.width() as f64;
                     let h = canvas.height() as f64;
                     ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0).ok();
-                    ctx.set_fill_style(&JsValue::from_str("#0e1116"));
+                    ctx.set_fill_style_str("#0e1116");
                     ctx.fill_rect(0.0, 0.0, w, h);
 
                     let cam = camera.borrow();
@@ -235,11 +235,11 @@ fn run_view(props: &RunViewProps) -> Html {
                     let gs = rs.grid_size;
 
                     // Grid background
-                    ctx.set_fill_style(&JsValue::from_str("#161b22"));
+                    ctx.set_fill_style_str("#161b22");
                     ctx.fill_rect(0.0, 0.0, gs.width as f64, gs.height as f64);
 
                     // Grid lines
-                    ctx.set_stroke_style(&JsValue::from_str("#2f3641"));
+                    ctx.set_stroke_style_str("#2f3641");
                     let line_w = (1.0 / scale_px).max(0.001);
                     ctx.set_line_width(line_w);
                     for x in 0..=gs.width {
@@ -275,9 +275,9 @@ fn run_view(props: &RunViewProps) -> Html {
                                             _ => "#1d2430",
                                         }
                                     };
-                                    ctx.set_fill_style(&JsValue::from_str(fill));
+                                    ctx.set_fill_style_str(fill);
                                     ctx.fill_rect(rx, ry, rw, rh);
-                                    ctx.set_stroke_style(&JsValue::from_str("#3a4455"));
+                                    ctx.set_stroke_style_str("#3a4455");
                                     ctx.set_line_width((1.0 / scale_px).max(0.001));
                                     ctx.stroke_rect(rx, ry, rw, rh);
                                 }
@@ -285,17 +285,17 @@ fn run_view(props: &RunViewProps) -> Html {
                                     // Fill as Path to keep uniform look
                                     let rx = x as f64;
                                     let ry = y as f64;
-                                    ctx.set_fill_style(&JsValue::from_str("#121721"));
+                                    ctx.set_fill_style_str("#121721");
                                     ctx.fill_rect(rx, ry, 1.0, 1.0);
                                     // Draw a blue circle at center
                                     let cx = x as f64 + 0.5;
                                     let cy = y as f64 + 0.5;
                                     let r = 0.35;
                                     ctx.begin_path();
-                                    ctx.set_fill_style(&JsValue::from_str("#58a6ff"));
+                                    ctx.set_fill_style_str("#58a6ff");
                                     ctx.arc(cx, cy, r, 0.0, std::f64::consts::PI * 2.0).ok();
                                     ctx.fill();
-                                    ctx.set_stroke_style(&JsValue::from_str("#1f6feb"));
+                                    ctx.set_stroke_style_str("#1f6feb");
                                     ctx.set_line_width((1.0 / scale_px).max(0.001));
                                     ctx.stroke();
                                 }
@@ -303,14 +303,14 @@ fn run_view(props: &RunViewProps) -> Html {
                                     // Fill as Path to keep uniform look
                                     let rx = x as f64;
                                     let ry = y as f64;
-                                    ctx.set_fill_style(&JsValue::from_str("#121721"));
+                                    ctx.set_fill_style_str("#121721");
                                     ctx.fill_rect(rx, ry, 1.0, 1.0);
                                     // Draw an oriented arrow triangle on top
                                     let color = match role {
                                         model::DirRole::Entrance => "#2ea043", // green
                                         model::DirRole::Exit => "#f0883e",     // orange
                                     };
-                                    ctx.set_fill_style(&JsValue::from_str(color));
+                                    ctx.set_fill_style_str(color);
                                     ctx.begin_path();
                                     match dir {
                                         model::ArrowDir::Right => {
@@ -342,9 +342,9 @@ fn run_view(props: &RunViewProps) -> Html {
                                     let ry = y as f64 + margin;
                                     let rw = 1.0 - 2.0 * margin;
                                     let rh = 1.0 - 2.0 * margin;
-                                    ctx.set_fill_style(&JsValue::from_str("#3c4454"));
+                                    ctx.set_fill_style_str("#3c4454");
                                     ctx.fill_rect(rx, ry, rw, rh);
-                                    ctx.set_stroke_style(&JsValue::from_str("#596273"));
+                                    ctx.set_stroke_style_str("#596273");
                                     ctx.set_line_width((1.0 / scale_px).max(0.001));
                                     ctx.stroke_rect(rx, ry, rw, rh);
                                 }
@@ -353,7 +353,7 @@ fn run_view(props: &RunViewProps) -> Html {
                                     let ry = y as f64;
                                     let rw = 1.0;
                                     let rh = 1.0;
-                                    ctx.set_fill_style(&JsValue::from_str("#121721"));
+                                    ctx.set_fill_style_str("#121721");
                                     ctx.fill_rect(rx, ry, rw, rh);
                                 }
                                 _ => {}
@@ -365,10 +365,10 @@ fn run_view(props: &RunViewProps) -> Html {
                     ctx.set_line_width((1.0 / scale_px).max(0.001));
                     for e in &rs.enemies {
                         ctx.begin_path();
-                        ctx.set_fill_style(&JsValue::from_str("#d73a49"));
+                        ctx.set_fill_style_str("#d73a49");
                         ctx.arc(e.x, e.y, 0.22, 0.0, std::f64::consts::PI * 2.0).ok();
                         ctx.fill();
-                        ctx.set_stroke_style(&JsValue::from_str("#b62324"));
+                        ctx.set_stroke_style_str("#b62324");
                         ctx.stroke();
                     }
 
@@ -379,7 +379,7 @@ fn run_view(props: &RunViewProps) -> Html {
                             let ry = m.tile_y as f64 + margin + (1.0 - 2.0*margin) * (1.0 - m.progress.clamp(0.0, 1.0));
                             let rw = 1.0 - 2.0 * margin;
                             let rh = (1.0 - 2.0 * margin) * m.progress.clamp(0.0, 1.0);
-                            ctx.set_fill_style(&JsValue::from_str("rgba(46,160,67,0.7)"));
+                            ctx.set_fill_style_str("rgba(46,160,67,0.7)");
                             ctx.fill_rect(rx, ry, rw, rh);
                         }
                     }
@@ -593,7 +593,7 @@ fn run_view(props: &RunViewProps) -> Html {
                     let button = e.button();
                     if button == 0 {
                         // Left click: start mining on tile under cursor
-                        let mut cam = camera.borrow_mut();
+                        let cam = camera.borrow_mut();
                         let tile_px = 32.0;
                         let scale_px = cam.zoom * tile_px;
                         let world_x = ((e.offset_x() as f64) - cam.offset_x) / scale_px;
