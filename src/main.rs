@@ -1,8 +1,10 @@
+use std::cell::RefCell; // added for RAF id storage
+use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlElement, KeyboardEvent};
-use yew::prelude::*;
+use yew::prelude::*; // added
 
 mod model;
 use model::{GridSize, RunAction, RunState, UpgradeState};
@@ -41,16 +43,48 @@ fn run_view(props: &RunViewProps) -> Html {
     let canvas_ref = use_node_ref();
     let camera = use_mut_ref(|| Camera::default());
     let mining = use_mut_ref(|| Mining::default());
+    let draw_ref = use_mut_ref(|| None::<Rc<dyn Fn()>>); // store current draw closure
+    let run_state_ref = use_mut_ref(|| props.run_state.clone()); // NEW: always updated handle
+    let show_path = use_state(|| false);
+    let show_path_flag = use_mut_ref(|| false);
+
+    // Redraw + log when show_path toggles (ensures canvas updates even if version not changing)
+    {
+        let draw_ref = draw_ref.clone();
+        let flag = *show_path;
+        let show_path_flag_ref = show_path_flag.clone();
+        use_effect_with(flag, move |_| {
+            *show_path_flag_ref.borrow_mut() = flag;
+            if let Some(f) = &*draw_ref.borrow() { f(); }
+            || ()
+        });
+    }
+
+    // Effect: on each version update, refresh run_state_ref to latest handle then redraw
+    {
+        let run_state_ref = run_state_ref.clone();
+        let current_handle = props.run_state.clone();
+        let draw_ref_local = draw_ref.clone();
+        let version = props.run_state.version;
+        use_effect_with(version, move |_| {
+            *run_state_ref.borrow_mut() = current_handle.clone();
+            if let Some(f) = &*draw_ref_local.borrow() {
+                f();
+            }
+            || ()
+        });
+    }
 
     {
         let canvas_ref = canvas_ref.clone();
         let camera = camera.clone();
         let run_state = props.run_state.clone();
+        let draw_ref_setup = draw_ref.clone();
+        let mining_setup = mining.clone();
 
         use_effect_with((), move |_| {
             let window = web_sys::window().expect("no global `window` exists");
             let document = window.document().expect("should have a document on window");
-
             let canvas: HtmlCanvasElement = canvas_ref
                 .cast::<HtmlCanvasElement>()
                 .expect("canvas_ref not attached to a canvas element");
@@ -93,7 +127,6 @@ fn run_view(props: &RunViewProps) -> Html {
                     let scale_px = cam.zoom * tile_px;
                     let w = canvas.width() as f64;
                     let h = canvas.height() as f64;
-                    // Find Start tile position; fallback to grid center if not found
                     let mut sx = (gs.width / 2) as u32;
                     let mut sy = (gs.height / 2) as u32;
                     for (i, t) in rs.tiles.iter().enumerate() {
@@ -111,39 +144,39 @@ fn run_view(props: &RunViewProps) -> Html {
                 }
             }
 
-            let draw = {
+            // Build draw closure and store in draw_ref
+            let draw_closure: Rc<dyn Fn()> = {
                 let canvas = canvas.clone();
                 let camera = camera.clone();
-                let run_state = run_state.clone();
-                let mining = mining.clone();
-                move || {
-                    let ctx = canvas
-                        .get_context("2d")
-                        .unwrap()
-                        .unwrap()
-                        .dyn_into::<CanvasRenderingContext2d>()
-                        .unwrap();
-
+                let run_state_ref = run_state_ref.clone();
+                let mining = mining_setup.clone();
+                let show_path_flag = show_path_flag.clone();
+                Rc::new(move || {
+                    if canvas.is_connected() == false {
+                        return;
+                    }
+                    let ctx = match canvas.get_context("2d").ok().flatten() {
+                        Some(c) => c.dyn_into::<CanvasRenderingContext2d>().unwrap(),
+                        None => return,
+                    };
                     let w = canvas.width() as f64;
                     let h = canvas.height() as f64;
-                    ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0).ok();
-                    ctx.set_fill_style_str("#0e1116");
-                    ctx.fill_rect(0.0, 0.0, w, h);
 
+                    // Acquire state & camera first
                     let cam = camera.borrow();
                     let tile_px = 32.0;
                     let scale_px = cam.zoom * tile_px;
-                    ctx.set_transform(scale_px, 0.0, 0.0, scale_px, cam.offset_x, cam.offset_y)
-                        .ok();
-
-                    let rs = (*run_state).clone();
+                    let rs_handle = run_state_ref.borrow();
+                    let rs = (**rs_handle).clone();
+                    let show_path_on = *show_path_flag.borrow();
+                    // Clear & set transform (always same background)
+                    ctx.set_transform(1.0,0.0,0.0,1.0,0.0,0.0).ok();
+                    ctx.set_fill_style_str("#0e1116");
+                    ctx.fill_rect(0.0,0.0,w,h);
+                    ctx.set_transform(scale_px,0.0,0.0,scale_px,cam.offset_x,cam.offset_y).ok();
                     let gs = rs.grid_size;
-
-                    // Grid background
                     ctx.set_fill_style_str("#161b22");
                     ctx.fill_rect(0.0, 0.0, gs.width as f64, gs.height as f64);
-
-                    // Grid lines
                     ctx.set_stroke_style_str("#2f3641");
                     let line_w = (1.0 / scale_px).max(0.001);
                     ctx.set_line_width(line_w);
@@ -159,9 +192,7 @@ fn run_view(props: &RunViewProps) -> Html {
                         ctx.line_to(gs.width as f64, y as f64);
                         ctx.stroke();
                     }
-
-                    // Draw tiles and special markers
-                    let margin = 0.1f64;
+                    let margin = 0.1;
                     for y in 0..gs.height {
                         for x in 0..gs.width {
                             let idx = (y * gs.width + x) as usize;
@@ -170,7 +201,7 @@ fn run_view(props: &RunViewProps) -> Html {
                                     let rx = x as f64 + margin;
                                     let ry = y as f64 + margin;
                                     let rw = 1.0 - 2.0 * margin;
-                                    let rh = 1.0 - 2.0 * margin;
+                                    let rh = rw;
                                     let fill = if has_gold {
                                         "#4d3b1f"
                                     } else {
@@ -187,56 +218,49 @@ fn run_view(props: &RunViewProps) -> Html {
                                     ctx.stroke_rect(rx, ry, rw, rh);
                                 }
                                 model::TileKind::Start => {
-                                    // Fill as Path to keep uniform look
+                                    // Uniform path background + start marker
                                     let rx = x as f64;
                                     let ry = y as f64;
-                                    ctx.set_fill_style_str("#121721");
+                                    ctx.set_fill_style_str("#082235");
                                     ctx.fill_rect(rx, ry, 1.0, 1.0);
-                                    // Draw a blue circle at center
-                                    let cx = x as f64 + 0.5;
-                                    let cy = y as f64 + 0.5;
-                                    let r = 0.35;
+                                    // Spawn marker (ringed circle)
+                                    let cx = rx + 0.5; let cy = ry + 0.5;
                                     ctx.begin_path();
                                     ctx.set_fill_style_str("#58a6ff");
-                                    ctx.arc(cx, cy, r, 0.0, std::f64::consts::PI * 2.0).ok();
+                                    ctx.arc(cx, cy, 0.30, 0.0, std::f64::consts::PI*2.0).ok();
                                     ctx.fill();
                                     ctx.set_stroke_style_str("#1f6feb");
-                                    ctx.set_line_width((1.0 / scale_px).max(0.001));
+                                    ctx.set_line_width((1.2/scale_px).max(0.001));
                                     ctx.stroke();
                                 }
                                 model::TileKind::Direction { dir, role } => {
-                                    // Fill as Path to keep uniform look
-                                    let rx = x as f64;
-                                    let ry = y as f64;
-                                    ctx.set_fill_style_str("#121721");
+                                    // Uniform path background + directional arrow overlay
+                                    let rx = x as f64; let ry = y as f64;
+                                    ctx.set_fill_style_str("#082235");
                                     ctx.fill_rect(rx, ry, 1.0, 1.0);
-                                    // Draw an oriented arrow triangle on top
-                                    let color = match role {
-                                        model::DirRole::Entrance => "#2ea043", // green
-                                        model::DirRole::Exit => "#f0883e",     // orange
-                                    };
+                                    let color = match role { model::DirRole::Entrance => "#2ea043", model::DirRole::Exit => "#f0883e" };
                                     ctx.set_fill_style_str(color);
                                     ctx.begin_path();
                                     match dir {
                                         model::ArrowDir::Right => {
-                                            ctx.move_to(x as f64 + 0.2, y as f64 + 0.2);
-                                            ctx.line_to(x as f64 + 0.2, y as f64 + 0.8);
-                                            ctx.line_to(x as f64 + 0.8, y as f64 + 0.5);
+                                            ctx.move_to(rx + 0.25, ry + 0.20);
+                                            ctx.line_to(rx + 0.25, ry + 0.80);
+                                            ctx.line_to(rx + 0.80, ry + 0.50);
                                         }
                                         model::ArrowDir::Left => {
-                                            ctx.move_to(x as f64 + 0.8, y as f64 + 0.2);
-                                            ctx.line_to(x as f64 + 0.8, y as f64 + 0.8);
-                                            ctx.line_to(x as f64 + 0.2, y as f64 + 0.5);
+                                            ctx.move_to(rx + 0.75, ry + 0.20);
+                                            ctx.line_to(rx + 0.75, ry + 0.80);
+                                            ctx.line_to(rx + 0.20, ry + 0.50);
                                         }
                                         model::ArrowDir::Up => {
-                                            ctx.move_to(x as f64 + 0.2, y as f64 + 0.8);
-                                            ctx.line_to(x as f64 + 0.8, y as f64 + 0.8);
-                                            ctx.line_to(x as f64 + 0.5, y as f64 + 0.2);
+                                            ctx.move_to(rx + 0.20, ry + 0.75);
+                                            ctx.line_to(rx + 0.80, ry + 0.75);
+                                            ctx.line_to(rx + 0.50, ry + 0.20);
                                         }
                                         model::ArrowDir::Down => {
-                                            ctx.move_to(x as f64 + 0.2, y as f64 + 0.2);
-                                            ctx.line_to(x as f64 + 0.8, y as f64 + 0.2);
-                                            ctx.line_to(x as f64 + 0.5, y as f64 + 0.8);
+                                            ctx.move_to(rx + 0.20, ry + 0.25);
+                                            ctx.line_to(rx + 0.80, ry + 0.25);
+                                            ctx.line_to(rx + 0.50, ry + 0.80);
                                         }
                                     }
                                     ctx.close_path();
@@ -246,7 +270,7 @@ fn run_view(props: &RunViewProps) -> Html {
                                     let rx = x as f64 + margin;
                                     let ry = y as f64 + margin;
                                     let rw = 1.0 - 2.0 * margin;
-                                    let rh = 1.0 - 2.0 * margin;
+                                    let rh = rw;
                                     ctx.set_fill_style_str("#3c4454");
                                     ctx.fill_rect(rx, ry, rw, rh);
                                     ctx.set_stroke_style_str("#596273");
@@ -254,30 +278,38 @@ fn run_view(props: &RunViewProps) -> Html {
                                     ctx.stroke_rect(rx, ry, rw, rh);
                                 }
                                 model::TileKind::Empty => {
+                                    // Use a slightly lighter tone to differentiate mined tiles clearly
                                     let rx = x as f64;
                                     let ry = y as f64;
-                                    let rw = 1.0;
-                                    let rh = 1.0;
-                                    ctx.set_fill_style_str("#121721");
-                                    ctx.fill_rect(rx, ry, rw, rh);
+                                    ctx.set_fill_style_str("#082235"); // higher contrast empty
+                                    ctx.fill_rect(rx, ry, 1.0, 1.0);
                                 }
                                 _ => {}
                             }
                         }
                     }
-
-                    // Draw enemies
+                    // enemies (size variation + wobble to reduce overlap)
+                    let wobble_freq = 5.0; // radians per second
                     ctx.set_line_width((1.0 / scale_px).max(0.001));
                     for e in &rs.enemies {
+                        let mut dx_dir = e.dir_dx;
+                        let mut dy_dir = e.dir_dy;
+                        let mag = (dx_dir*dx_dir + dy_dir*dy_dir).sqrt();
+                        if mag < 1e-6 { dx_dir = 1.0; dy_dir = 0.0; } else { dx_dir/=mag; dy_dir/=mag; }
+                        // perpendicular vector
+                        let px = -dy_dir; let py = dx_dir;
+                        let phase = e.wobble_phase + rs.sim_time * wobble_freq;
+                        let wob = phase.sin() * e.wobble_amp;
+                        let draw_x = e.x + px * wob;
+                        let draw_y = e.y + py * wob;
+                        let radius = 0.28 * e.radius_scale;
                         ctx.begin_path();
-                        ctx.set_fill_style_str("#d73a49");
-                        ctx.arc(e.x, e.y, 0.22, 0.0, std::f64::consts::PI * 2.0)
-                            .ok();
+                        ctx.set_fill_style_str("#00eaff");
+                        ctx.arc(draw_x, draw_y, radius, 0.0, std::f64::consts::PI * 2.0).ok();
                         ctx.fill();
-                        ctx.set_stroke_style_str("#b62324");
+                        ctx.set_stroke_style_str("#a80032");
                         ctx.stroke();
                     }
-
                     let m = mining.borrow();
                     if m.active && m.mouse_down {
                         if m.tile_x >= 0
@@ -295,21 +327,63 @@ fn run_view(props: &RunViewProps) -> Html {
                             ctx.fill_rect(rx, ry, rw, rh);
                         }
                     }
-                }
+                    // Optional path visualization: simple polyline only
+                    if show_path_on {
+                        let path_for_draw: Vec<model::Position> = if !rs.path_loop.is_empty() { rs.path_loop.clone() } else { rs.path.clone() };
+                        if path_for_draw.is_empty() {
+                            // Optional small notice (can be removed if not desired)
+                            ctx.set_transform(1.0,0.0,0.0,1.0,0.0,0.0).ok();
+                            ctx.set_fill_style_str("rgba(255,80,80,0.9)");
+                            ctx.set_font("12px sans-serif");
+                            ctx.fill_text("No path", 10.0, 40.0).ok();
+                            ctx.set_transform(scale_px,0.0,0.0,scale_px,cam.offset_x,cam.offset_y).ok();
+                        } else if path_for_draw.len() >= 2 {
+                            ctx.set_stroke_style_str("#ff66ff");
+                            ctx.set_line_width((2.5/scale_px).max(0.002));
+                            ctx.begin_path();
+                            for (i,node) in path_for_draw.iter().enumerate() {
+                                let cx = node.x as f64 + 0.5;
+                                let cy = node.y as f64 + 0.5;
+                                if i==0 { ctx.move_to(cx,cy); } else { ctx.line_to(cx,cy); }
+                            }
+                            ctx.stroke();
+                        }
+                    }
+                })
             };
+            *draw_ref_setup.borrow_mut() = Some(draw_closure.clone());
 
-            // Seed initial path via a zero dt sim tick if needed
-            if (*run_state).path.is_empty() {
-                run_state.dispatch(RunAction::SimTick { dt: 0.0 });
+            // Initial draw
+            (draw_closure)();
+
+            // Animation frame loop to ensure redraws even when run not started (e.g., for path toggle)
+            let raf_id = Rc::new(RefCell::new(None));
+            {
+                let raf_id_clone = raf_id.clone();
+                let draw_ref_loop = draw_ref_setup.clone();
+                let window_loop = window.clone();
+                let closure_cell: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+                let closure_cell_clone = closure_cell.clone();
+                *closure_cell.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+                    if let Some(f) = &*draw_ref_loop.borrow() { f(); }
+                    // schedule next frame
+                    if let Ok(id) = window_loop.request_animation_frame(closure_cell_clone.borrow().as_ref().unwrap().as_ref().unchecked_ref()) {
+                        *raf_id_clone.borrow_mut() = Some(id);
+                    }
+                }) as Box<dyn FnMut()>));
+                // kick off
+                if let Ok(id) = window.request_animation_frame(closure_cell.borrow().as_ref().unwrap().as_ref().unchecked_ref()) {
+                    *raf_id.borrow_mut() = Some(id);
+                }
+                // store closure_cell & raf_id in canvas dataset? not needed; captured by cleanup
+                // Add to cleanup below
             }
 
-            draw();
-
-            // Mining tick (~60 FPS)
+            // Mining tick
             let mining_tick = {
                 let run_state = run_state.clone();
-                let mining = mining.clone();
-                let draw = draw.clone();
+                let mining = mining_setup.clone();
+                let draw_ref = draw_ref_setup.clone();
                 Closure::wrap(Box::new(move || {
                     let mut m = mining.borrow_mut();
                     if !m.active || !m.mouse_down {
@@ -333,25 +407,18 @@ fn run_view(props: &RunViewProps) -> Html {
                         m.elapsed_secs += 0.016;
                         m.progress = (m.elapsed_secs / m.required_secs).min(1.0);
                         if m.progress >= 1.0 {
-                            // complete mining
                             run_state.dispatch(RunAction::MiningComplete { idx });
                             m.active = false;
                             m.mouse_down = false;
                             m.progress = 0.0;
                             m.elapsed_secs = 0.0;
-                            drop(m); // release before draw (draw borrows mining immutably)
-                            draw();
-                            return;
                         } else {
                             if !rs_snap.started {
                                 run_state.dispatch(RunAction::StartRun);
                             }
                         }
-                        drop(m); // release before draw
-                        draw();
-                    } else {
-                        m.active = false;
                     }
+                    drop(m);
                 }) as Box<dyn FnMut()>)
             };
             let mining_tick_id = window
@@ -361,13 +428,12 @@ fn run_view(props: &RunViewProps) -> Html {
                 )
                 .unwrap();
 
-            // Simulation tick (~60 FPS)
+            // Simulation tick
             let sim_tick = {
                 let run_state = run_state.clone();
-                let draw = draw.clone();
+                let draw_ref = draw_ref_setup.clone();
                 Closure::wrap(Box::new(move || {
                     run_state.dispatch(RunAction::SimTick { dt: 0.016 });
-                    draw();
                 }) as Box<dyn FnMut()>)
             };
             let sim_tick_id = window
@@ -377,10 +443,10 @@ fn run_view(props: &RunViewProps) -> Html {
                 )
                 .unwrap();
 
-            // Wheel (zoom)
+            // Wheel
             let wheel_cb = {
                 let camera = camera.clone();
-                let draw = draw.clone();
+                let draw_ref = draw_ref_setup.clone();
                 Closure::wrap(Box::new(move |e: web_sys::WheelEvent| {
                     e.prevent_default();
                     let mut cam = camera.borrow_mut();
@@ -397,7 +463,9 @@ fn run_view(props: &RunViewProps) -> Html {
                     cam.offset_x = canvas_x - world_x * new_scale;
                     cam.offset_y = canvas_y - world_y * new_scale;
                     drop(cam);
-                    draw();
+                    if let Some(f) = &*draw_ref.borrow() {
+                        f();
+                    }
                 }) as Box<dyn FnMut(_)>)
             };
             canvas
@@ -407,9 +475,9 @@ fn run_view(props: &RunViewProps) -> Html {
             // Mouse down
             let mousedown_cb = {
                 let camera = camera.clone();
-                let mining = mining.clone();
+                let mining = mining_setup.clone();
                 let run_state = run_state.clone();
-                let draw = draw.clone();
+                let draw_ref = draw_ref_setup.clone();
                 Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
                     let button = e.button();
                     if button == 0 {
@@ -443,7 +511,6 @@ fn run_view(props: &RunViewProps) -> Html {
                                 m.active = true;
                                 m.mouse_down = true;
                                 drop(m);
-                                draw();
                             }
                         }
                     } else {
@@ -451,6 +518,9 @@ fn run_view(props: &RunViewProps) -> Html {
                         cam.panning = true;
                         cam.last_x = e.client_x() as f64;
                         cam.last_y = e.client_y() as f64;
+                    }
+                    if let Some(f) = &*draw_ref.borrow() {
+                        f();
                     }
                 }) as Box<dyn FnMut(_)>)
             };
@@ -464,9 +534,9 @@ fn run_view(props: &RunViewProps) -> Html {
             // Mouse move
             let mousemove_cb = {
                 let camera = camera.clone();
-                let mining = mining.clone();
+                let mining = mining_setup.clone();
                 let run_state = run_state.clone();
-                let draw = draw.clone();
+                let draw_ref = draw_ref_setup.clone();
                 Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
                     let mut cam = camera.borrow_mut();
                     if cam.panning {
@@ -479,24 +549,24 @@ fn run_view(props: &RunViewProps) -> Html {
                         cam.offset_x += dx;
                         cam.offset_y += dy;
                         drop(cam);
-                        draw();
-                    } else {
-                        let tile_px = 32.0;
-                        let scale_px = cam.zoom * tile_px;
-                        let world_x = ((e.offset_x() as f64) - cam.offset_x) / scale_px;
-                        let world_y = ((e.offset_y() as f64) - cam.offset_y) / scale_px;
-                        drop(cam);
-                        let mut m = mining.borrow_mut();
-                        if m.mouse_down {
-                            let rs = (*run_state).clone();
-                            if rs.is_paused {
-                                m.active = false;
-                                m.progress = 0.0;
-                                m.elapsed_secs = 0.0;
-                                drop(m);
-                                draw();
-                                return;
-                            }
+                        if let Some(f) = &*draw_ref.borrow() {
+                            f();
+                        }
+                        return;
+                    }
+                    let tile_px = 32.0;
+                    let scale_px = cam.zoom * tile_px;
+                    let world_x = ((e.offset_x() as f64) - cam.offset_x) / scale_px;
+                    let world_y = ((e.offset_y() as f64) - cam.offset_y) / scale_px;
+                    drop(cam);
+                    let mut m = mining.borrow_mut();
+                    if m.mouse_down {
+                        let rs = (*run_state).clone();
+                        if rs.is_paused {
+                            m.active = false;
+                            m.progress = 0.0;
+                            m.elapsed_secs = 0.0;
+                        } else {
                             let gs = rs.grid_size;
                             let tx = world_x.floor() as i32;
                             let ty = world_y.floor() as i32;
@@ -530,9 +600,11 @@ fn run_view(props: &RunViewProps) -> Html {
                                 m.progress = 0.0;
                                 m.elapsed_secs = 0.0;
                             }
-                            drop(m);
-                            draw();
                         }
+                    }
+                    drop(m);
+                    if let Some(f) = &*draw_ref.borrow() {
+                        f();
                     }
                 }) as Box<dyn FnMut(_)>)
             };
@@ -546,8 +618,8 @@ fn run_view(props: &RunViewProps) -> Html {
             // Mouse up
             let mouseup_cb = {
                 let camera = camera.clone();
-                let mining = mining.clone();
-                let draw = draw.clone();
+                let mining = mining_setup.clone();
+                let draw_ref = draw_ref_setup.clone();
                 Closure::wrap(Box::new(move |_e: web_sys::MouseEvent| {
                     let mut cam = camera.borrow_mut();
                     cam.panning = false;
@@ -558,14 +630,16 @@ fn run_view(props: &RunViewProps) -> Html {
                     m.progress = 0.0;
                     m.elapsed_secs = 0.0;
                     drop(m);
-                    draw();
+                    if let Some(f) = &*draw_ref.borrow() {
+                        f();
+                    }
                 }) as Box<dyn FnMut(_)>)
             };
             window
                 .add_event_listener_with_callback("mouseup", mouseup_cb.as_ref().unchecked_ref())
                 .unwrap();
 
-            // Context menu prevent
+            // Context menu
             let contextmenu_cb = {
                 Closure::wrap(Box::new(move |e: web_sys::Event| {
                     e.prevent_default();
@@ -580,10 +654,13 @@ fn run_view(props: &RunViewProps) -> Html {
 
             // Resize
             let resize_cb = {
-                let draw = draw.clone();
+                let compute_and_apply_canvas_size = compute_and_apply_canvas_size.clone();
+                let draw_ref = draw_ref_setup.clone();
                 Closure::wrap(Box::new(move |_e: web_sys::Event| {
                     compute_and_apply_canvas_size();
-                    draw();
+                    if let Some(f) = &*draw_ref.borrow() {
+                        f();
+                    }
                 }) as Box<dyn FnMut(_)>)
             };
             window
@@ -618,6 +695,7 @@ fn run_view(props: &RunViewProps) -> Html {
                 );
                 let _ = window.clear_interval_with_handle(mining_tick_id);
                 let _ = window.clear_interval_with_handle(sim_tick_id);
+                if let Some(id) = *raf_id.borrow() { let _ = window.cancel_animation_frame(id); }
                 drop(mining_tick);
                 drop(sim_tick);
                 drop(wheel_cb);
@@ -666,16 +744,31 @@ fn run_view(props: &RunViewProps) -> Html {
     let life_ov = rs_overlay.life;
     let time_ov = rs_overlay.stats.time_survived_secs;
     let paused_ov = rs_overlay.is_paused;
+    let game_over = rs_overlay.game_over; // new
+    let enemy_count = rs_overlay.enemies.len(); // debug
+    let path_len = if !rs_overlay.path_loop.is_empty() { rs_overlay.path_loop.len() } else { rs_overlay.path.len() }; // debug loop length
     let pause_label_rv = if paused_ov {
-        "Resume (Space)"
+        if game_over {
+            "Game Over"
+        } else {
+            "Resume (Space)"
+        }
     } else {
         "Pause (Space)"
     };
     let toggle_pause_rv = {
         let run_state = props.run_state.clone();
         Callback::from(move |_: yew::events::MouseEvent| {
-            let mut s = run_state.clone();
-            s.dispatch(RunAction::TogglePause);
+            if !run_state.game_over {
+                let mut s = run_state.clone();
+                s.dispatch(RunAction::TogglePause);
+            }
+        })
+    };
+    let restart_cb = {
+        let run_state = props.run_state.clone();
+        Callback::from(move |_: yew::events::MouseEvent| {
+            run_state.dispatch(RunAction::ResetRun);
         })
     };
     let to_upgrades_click = {
@@ -779,6 +872,9 @@ fn run_view(props: &RunViewProps) -> Html {
         })
     };
 
+    let path_debug_text = if *show_path { let rsd = (*props.run_state).clone(); let source = if !rsd.path_loop.is_empty() { &rsd.path_loop } else { &rsd.path }; if source.is_empty() { "(empty)".to_string() } else { let mut s=String::new(); for (i,p) in source.iter().enumerate(){ if i>0 { s.push_str(" -> "); } s.push_str(&format!("({},{})", p.x,p.y)); if i>14 { s.push_str(" ..."); break; } } s } } else { String::new() };
+    let path_nodes_style = if *show_path { "font-size:11px; opacity:0.7;" } else { "font-size:11px; opacity:0.7; display:none;" };
+
     html! {
         <div style="position:relative; width:100vw; height:100vh;">
             <canvas ref={canvas_ref.clone()} id="game-canvas" style="display:block; width:100%; height:100%;"></canvas>
@@ -789,9 +885,16 @@ fn run_view(props: &RunViewProps) -> Html {
                 <div>{ format!("Gold: {}", gold_ov) }</div>
                 <div>{ format!("Life: {}", life_ov) }</div>
                 <div>{ format!("Research: {}", research_ov) }</div>
+                <div style="font-size:11px; opacity:0.7;">{ format!("Enemies: {}", enemy_count) }</div>
+                <div style="font-size:11px; opacity:0.7;">{ format!("Path: {}", path_len) }</div>
+                <div style={path_nodes_style.to_string()}>{ format!("PathNodes: {}", path_debug_text) }</div>
             </div>
-            <div style="position:absolute; top:12px; right:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:180px; display:flex; flex-direction:column; gap:6px;">
+            <div style="position:absolute; top:12px; right:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:200px; display:flex; flex-direction:column; gap:6px;">
                 <button onclick={toggle_pause_rv.clone()}>{ pause_label_rv }</button>
+                <button onclick={ {
+                    let show_path = show_path.clone();
+                    Callback::from(move |_| show_path.set(!*show_path))
+                } }>{ if *show_path { "Hide Path" } else { "Show Path" } }</button>
                 <button onclick={to_upgrades_click.clone()}>{"Upgrades"}</button>
             </div>
             <div style="position:absolute; left:12px; bottom:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; display:flex; gap:6px; align-items:center;">
@@ -813,8 +916,20 @@ fn run_view(props: &RunViewProps) -> Html {
                 { if has_indestructible { html!{ <LegendRow color="#3c4454" label="Indestructible" /> } } else { html!{} } }
                 { if has_basic { html!{ <LegendRow color="#1d2430" label="Rock" /> } } else { html!{} } }
                 { if has_gold { html!{ <LegendRow color="#4d3b1f" label="Gold Rock" /> } } else { html!{} } }
-                { if has_empty { html!{ <LegendRow color="#121721" label="Path" /> } } else { html!{} } }
+                { if has_empty { html!{ <LegendRow color="#082235" label="Path" /> } } else { html!{} } }
             </div>
+            { if game_over {
+                html! { <div style="position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); background:rgba(0,0,0,0.85); border:2px solid #f85149; padding:24px 32px; border-radius:12px; text-align:center; min-width:320px;">
+                    <h2 style="margin:0 0 12px 0; color:#f85149;">{"Game Over"}</h2>
+                    <p style="margin:4px 0;">{ format!("Time Survived: {}", format_time(time_ov)) }</p>
+                    <p style="margin:4px 0;">{ format!("Loops Completed: {}", rs_overlay.stats.loops_completed) }</p>
+                    <p style="margin:4px 0;">{ format!("Blocks Mined: {}", rs_overlay.stats.blocks_mined) }</p>
+                    <div style="margin-top:16px; display:flex; gap:12px; justify-content:center;">
+                        <button onclick={restart_cb.clone()}> {"Restart Run"} </button>
+                        <button onclick={to_upgrades_click.clone()}> {"Upgrades"} </button>
+                    </div>
+                </div> }
+            } else { html! {} } }
         </div>
     }
 }
@@ -848,7 +963,7 @@ struct Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
-            zoom: 1.0,
+            zoom: 2.5,
             offset_x: 0.0,
             offset_y: 0.0,
             panning: false,
