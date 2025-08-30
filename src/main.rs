@@ -383,7 +383,6 @@ fn run_view(props: &RunViewProps) -> Html {
             let mining_tick = {
                 let run_state = run_state.clone();
                 let mining = mining_setup.clone();
-                let draw_ref = draw_ref_setup.clone();
                 Closure::wrap(Box::new(move || {
                     let mut m = mining.borrow_mut();
                     if !m.active || !m.mouse_down {
@@ -431,7 +430,6 @@ fn run_view(props: &RunViewProps) -> Html {
             // Simulation tick
             let sim_tick = {
                 let run_state = run_state.clone();
-                let draw_ref = draw_ref_setup.clone();
                 Closure::wrap(Box::new(move || {
                     run_state.dispatch(RunAction::SimTick { dt: 0.016 });
                 }) as Box<dyn FnMut()>)
@@ -760,8 +758,7 @@ fn run_view(props: &RunViewProps) -> Html {
         let run_state = props.run_state.clone();
         Callback::from(move |_: yew::events::MouseEvent| {
             if !run_state.game_over {
-                let mut s = run_state.clone();
-                s.dispatch(RunAction::TogglePause);
+                run_state.dispatch(RunAction::TogglePause);
             }
         })
     };

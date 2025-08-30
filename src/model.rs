@@ -8,7 +8,9 @@ use std::rc::Rc;
 use wasm_bindgen::JsValue;
 use yew::Reducible; // added for logging // re-add for debug logging
 
+#[allow(dead_code)]
 const DEBUG_LOG: bool = false;
+#[allow(dead_code)]
 fn dlog(msg: &str) {
     if DEBUG_LOG {
         web_sys::console::log_1(&JsValue::from_str(msg));
@@ -428,7 +430,6 @@ fn build_loop_path(rs: &RunState) -> Vec<Position> {
 #[derive(Clone, Debug)]
 pub enum RunAction {
     TogglePause,
-    SetPaused(bool),
     StartRun,
     TickSecond, // called once per elapsed real second
     MiningComplete { idx: usize },
@@ -451,11 +452,6 @@ impl Reducible for RunState {
             TogglePause => {
                 if !new.game_over {
                     new.is_paused = !new.is_paused;
-                }
-            }
-            SetPaused(p) => {
-                if !new.game_over {
-                    new.is_paused = p;
                 }
             }
             StartRun => {
@@ -482,7 +478,7 @@ impl Reducible for RunState {
                         }
                         new.path = compute_path(&new);
                         new.path_loop = build_loop_path(&new);
-                        reassign_enemy_path_indices(&mut new);
+                        adjust_enemies_after_path_change(&mut new);
                         if !new.path.is_empty() {
                             let last_index = new.path.len().saturating_sub(1);
                             for e in &mut new.enemies {
@@ -526,7 +522,7 @@ impl Reducible for RunState {
                         }
                         // smooth direction based on displacement
                         let raw_dx = e.x - old_x; let raw_dy = e.y - old_y; let raw_mag = (raw_dx*raw_dx + raw_dy*raw_dy).sqrt();
-                        if raw_mag > 1e-5 { let mut ndx = raw_dx/raw_mag; let mut ndy = raw_dy/raw_mag; // blend
+                        if raw_mag > 1e-5 { let ndx = raw_dx/raw_mag; let ndy = raw_dy/raw_mag; // blend
                             let blend = 0.25; e.dir_dx = (1.0-blend)*e.dir_dx + blend*ndx; e.dir_dy = (1.0-blend)*e.dir_dy + blend*ndy; // renormalize
                             let nmag = (e.dir_dx*e.dir_dx + e.dir_dy*e.dir_dy).sqrt(); if nmag>1e-6 { e.dir_dx/=nmag; e.dir_dy/=nmag; }
                         }
@@ -537,13 +533,12 @@ impl Reducible for RunState {
                 let path_available = if !new.path_loop.is_empty() { new.path_loop.len() } else { new.path.len() };
                 let need_spawn = path_available >= 1 && (new.enemies.is_empty() || t.saturating_sub(new.last_enemy_spawn_time_secs) >= 2);
                 if need_spawn {
-                    let first = if !new.path_loop.is_empty() { new.path_loop[0] } else { new.path[0] };
                     let speed = 1.0 + 0.002 * (t as f64);
                     let hp = 5 + (t / 10) as u32;
                     let phase = js_sys::Math::random() * std::f64::consts::TAU;
                     let amp = 0.08 + js_sys::Math::random()*0.06; // 0.08..0.14 tiles
                     let rscale = 0.85 + js_sys::Math::random()*0.3; // 0.85..1.15
-                    let (init_dx, init_dy) = if new.path_loop.len() > 1 { let a=new.path_loop[0]; let b=new.path_loop[1]; let mut dx=(b.x as f64 - a.x as f64); let mut dy=(b.y as f64 - a.y as f64); let mag=(dx*dx+dy*dy).sqrt(); if mag>1e-6 { dx/=mag; dy/=mag; } (dx,dy) } else { (1.0,0.0) };
+                    let (init_dx, init_dy) = if new.path_loop.len() > 1 { let a=new.path_loop[0]; let b=new.path_loop[1]; let mut dx = b.x as f64 - a.x as f64; let mut dy = b.y as f64 - a.y as f64; let mag=(dx*dx+dy*dy).sqrt(); if mag>1e-6 { dx/=mag; dy/=mag; } (dx,dy) } else { (1.0,0.0) };
                     // Spawn at Start tile center (path_loop[0]) and target next waypoint (index 1 if exists)
                     let path_index = if new.path_loop.len() > 1 { 1 } else { 0 };
                     new.enemies.push(Enemy { x: new.path_loop[0].x as f64 + 0.5, y: new.path_loop[0].y as f64 + 0.5, speed_tps: speed, hp, spawned_at: t, path_index, wobble_phase: phase, wobble_amp: amp, radius_scale: rscale, dir_dx: init_dx, dir_dy: init_dy });
@@ -568,41 +563,45 @@ pub struct UpgradeState {
 
 // TODO: Implement BFS/A* pathfinding utilities ensuring Start->End remains reachable when placing walls.
 // TODO: Add persistence helpers (e.g., serialize/deserialize UpgradeState to localStorage via gloo-storage).
-fn reassign_enemy_path_indices(rs: &mut RunState) {
+fn adjust_enemies_after_path_change(rs: &mut RunState) {
+    if rs.enemies.is_empty() { return; }
     let nodes = if !rs.path_loop.is_empty() { &rs.path_loop } else { &rs.path };
     let len = nodes.len();
     if len == 0 { return; }
-    let cyclic = !rs.path_loop.is_empty();
+    let gs = rs.grid_size;
+    let in_bounds = |x: i32, y: i32| x >= 0 && y >= 0 && (x as u32) < gs.width && (y as u32) < gs.height;
+    let is_walkable = |tile: &TileKind| matches!(tile, TileKind::Empty | TileKind::Start | TileKind::Direction{..});
+    // Precompute a map from (x,y) -> node index for O(1) target detection
+    let mut node_map = vec![usize::MAX; (gs.width * gs.height) as usize];
+    for (i,n) in nodes.iter().enumerate() { let idx = (n.y * gs.width + n.x) as usize; node_map[idx] = i; }
     for e in &mut rs.enemies {
-        let mut best_d2 = f64::MAX;
-        let mut best_px = e.x;
-        let mut best_py = e.y;
-        let mut best_next_idx = 0usize;
-        let seg_count = if cyclic { len } else { len.saturating_sub(1) };
-        for i in 0..seg_count {
-            let j = (i + 1) % len;
-            if !cyclic && j == 0 { continue; }
-            let a = nodes[i];
-            let b = nodes[j];
-            let ax = a.x as f64 + 0.5; let ay = a.y as f64 + 0.5;
-            let bx = b.x as f64 + 0.5; let by = b.y as f64 + 0.5;
-            let vx = bx - ax; let vy = by - ay;
-            let vlen2 = vx*vx + vy*vy;
-            if vlen2 < 1e-9 { continue; }
-            let wx = e.x - ax; let wy = e.y - ay;
-            let mut t = (wx*vx + wy*vy)/vlen2;
-            if t < 0.0 { t = 0.0; } else if t > 1.0 { t = 1.0; }
-            let px = ax + vx * t; let py = ay + vy * t;
-            let dx = px - e.x; let dy = py - e.y; let d2 = dx*dx + dy*dy;
-            if d2 < best_d2 {
-                best_d2 = d2;
-                best_px = px; best_py = py;
-                best_next_idx = j; // move toward end of this segment
-            }
+        let prev_node = if e.path_index == 0 { len.saturating_sub(1) } else { e.path_index - 1 };
+        let ex_tile = e.x.floor() as i32; let ey_tile = e.y.floor() as i32;
+        if !in_bounds(ex_tile, ey_tile) { continue; }
+        let start_idx = (ey_tile as u32 * gs.width + ex_tile as u32) as usize;
+        use std::collections::VecDeque;
+        let mut q = VecDeque::new();
+        let mut visited = vec![false; (gs.width * gs.height) as usize];
+        q.push_back(start_idx); visited[start_idx]=true;
+        let mut found_node: Option<usize> = None;
+        while let Some(idx) = q.pop_front() {
+            let node_id = node_map[idx];
+            if node_id != usize::MAX { found_node = Some(node_id); break; }
+            let x = (idx as u32 % gs.width) as i32; let y = (idx as u32 / gs.width) as i32;
+            for (dx,dy) in [(1,0),(-1,0),(0,1),(0,-1)] { let nx=x+dx; let ny=y+dy; if !in_bounds(nx,ny){continue;} let nidx=(ny as u32 * gs.width + nx as u32) as usize; if visited[nidx]{continue;} if !is_walkable(&rs.tiles[nidx].kind){continue;} visited[nidx]=true; q.push_back(nidx);}        }
+        if let Some(mut node_i) = found_node {
+            // compute forward distance from prev_node to candidate (cyclic)
+            let forward_dist = if node_i >= prev_node { node_i - prev_node } else { node_i + len - prev_node };
+            let backward_dist = if prev_node >= node_i { prev_node - node_i } else { prev_node + len - node_i };
+            // If candidate is strictly behind and not a simple wrap (forward_dist > backward_dist), keep previous node
+            if backward_dist < forward_dist && backward_dist > 0 { node_i = prev_node; }
+            let pos = nodes[node_i];
+            e.x = pos.x as f64 + 0.5; e.y = pos.y as f64 + 0.5;
+            e.path_index = if len > 1 { (node_i + 1) % len } else { 0 };
+        } else {
+            let mut best = prev_node; let mut best_d2 = f64::MAX;
+            for (i,n) in nodes.iter().enumerate(){ let dx=(n.x as f64+0.5)-e.x; let dy=(n.y as f64+0.5)-e.y; let d2=dx*dx+dy*dy; if d2<best_d2 { best_d2=d2; best=i; } }
+            let pos = nodes[best]; e.x = pos.x as f64 + 0.5; e.y = pos.y as f64 + 0.5; e.path_index = if len>1 { (best+1)%len } else {0};
         }
-        // Update enemy position and target index
-        e.x = best_px;
-        e.y = best_py;
-        e.path_index = best_next_idx.min(len-1);
     }
 }
