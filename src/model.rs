@@ -3,6 +3,9 @@
 //! TODOs are included to guide future implementation.
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::rc::Rc;
+use yew::Reducible;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GridSize {
@@ -222,6 +225,124 @@ impl RunState {
             enemies: Vec::new(),
             last_enemy_spawn_time_secs: 0,
         }
+    }
+}
+
+// ---------------- Pathfinding helpers -----------------
+fn dir_to_delta(dir: ArrowDir) -> (i32, i32) {
+    match dir { ArrowDir::Up => (0,-1), ArrowDir::Down => (0,1), ArrowDir::Left => (-1,0), ArrowDir::Right => (1,0) }
+}
+
+fn find_entrance_exit(rs: &RunState) -> Option<((i32,i32,ArrowDir),(i32,i32,ArrowDir))> {
+    let gs = rs.grid_size;
+    let mut ent: Option<(i32,i32,ArrowDir)> = None;
+    let mut exit: Option<(i32,i32,ArrowDir)> = None;
+    for y in 0..gs.height { for x in 0..gs.width { let idx = (y * gs.width + x) as usize; if let TileKind::Direction { dir, role } = rs.tiles[idx].kind { match role { DirRole::Entrance => ent = Some((x as i32, y as i32, dir)), DirRole::Exit => exit = Some((x as i32, y as i32, dir)), } } } }
+    match (ent, exit) { (Some(e), Some(x)) => Some((e,x)), _ => None }
+}
+
+pub fn compute_path(rs: &RunState) -> Vec<Position> {
+    let gs = rs.grid_size;
+    let Some(((ex, ey, edir), (xx, xy, xdir))) = find_entrance_exit(rs) else { return Vec::new(); };
+    let (edx, edy) = dir_to_delta(edir);
+    let (xdx, xdy) = dir_to_delta(xdir);
+    let sx = ex + edx; // start from cell beyond entrance arrow
+    let sy = ey + edy;
+    let tx = xx - xdx; // end at cell before exit arrow (neighbor Empty ensured)
+    let ty = xy - xdy;
+    let in_bounds = |x: i32, y: i32| x >= 0 && y >= 0 && (x as u32) < gs.width && (y as u32) < gs.height;
+    if !in_bounds(sx, sy) || !in_bounds(tx, ty) { return Vec::new(); }
+    let sidx = (sy as u32 * gs.width + sx as u32) as usize;
+    let tidx = (ty as u32 * gs.width + tx as u32) as usize;
+    let is_empty = |idx: usize| matches!(rs.tiles[idx].kind, TileKind::Empty);
+    if !is_empty(sidx) || !is_empty(tidx) { return Vec::new(); }
+    let mut q: VecDeque<usize> = VecDeque::new();
+    let mut visited = vec![false; (gs.width * gs.height) as usize];
+    let mut parent: Vec<Option<usize>> = vec![None; (gs.width * gs.height) as usize];
+    visited[sidx] = true; q.push_back(sidx);
+    let dirs = [(1,0),(-1,0),(0,1),(0,-1)];
+    while let Some(idx) = q.pop_front() {
+        if idx == tidx { break; }
+        let x = (idx as u32 % gs.width) as i32; let y = (idx as u32 / gs.width) as i32;
+        for (dx,dy) in dirs { let nx = x + dx; let ny = y + dy; if !in_bounds(nx, ny) { continue; } let nidx = (ny as u32 * gs.width + nx as u32) as usize; if visited[nidx] { continue; } if !is_empty(nidx) { continue; } visited[nidx] = true; parent[nidx] = Some(idx); q.push_back(nidx); }
+    }
+    if !visited[tidx] { return Vec::new(); }
+    let mut path_rev: Vec<usize> = Vec::new();
+    let mut cur = Some(tidx);
+    while let Some(ci) = cur { path_rev.push(ci); cur = parent[ci]; }
+    path_rev.reverse();
+    path_rev.into_iter().map(|i| { let x = (i as u32 % gs.width) as u32; let y = (i as u32 / gs.width) as u32; Position { x, y } }).collect()
+}
+
+// ---------------- Reducer & Actions -----------------
+#[derive(Clone, Debug)]
+pub enum RunAction {
+    TogglePause,
+    SetPaused(bool),
+    StartRun,
+    TickSecond, // called once per elapsed real second
+    MiningComplete { idx: usize },
+    SimTick { dt: f64 }, // ~16ms; advances enemies & spawns
+}
+
+impl Reducible for RunState {
+    type Action = RunAction;
+
+    fn reduce(self: Rc<Self>, action: Self::Action) -> Rc<Self> {
+        use RunAction::*;
+        let mut new = (*self).clone();
+        match action {
+            TogglePause => { new.is_paused = !new.is_paused; }
+            SetPaused(p) => { new.is_paused = p; }
+            StartRun => { if !new.started { new.started = true; } }
+            TickSecond => {
+                if new.started && !new.is_paused { new.stats.time_survived_secs = new.stats.time_survived_secs.saturating_add(1); }
+            }
+            MiningComplete { idx } => {
+                if idx < new.tiles.len() {
+                    if let TileKind::Rock { has_gold, .. } = new.tiles[idx].kind.clone() {
+                        new.tiles[idx].kind = TileKind::Empty;
+                        if new.stats.blocks_mined < u32::MAX { new.stats.blocks_mined += 1; }
+                        new.currencies.tile_credits = new.currencies.tile_credits.saturating_add(1);
+                        if has_gold { new.currencies.gold = new.currencies.gold.saturating_add(1); }
+                        // Recompute path after terrain change
+                        new.path = compute_path(&new);
+                    }
+                }
+            }
+            SimTick { dt } => {
+                if !(new.started && !new.is_paused) { return self; }
+                if new.path.is_empty() { new.path = compute_path(&new); }
+                // Spawn cadence: every 2 seconds if path len>=2
+                let t = new.stats.time_survived_secs;
+                if new.path.len() >= 2 && t.saturating_sub(new.last_enemy_spawn_time_secs) >= 2 {
+                    let first = new.path[0];
+                    let speed = 1.0 + 0.002 * (t as f64);
+                    let hp = 5 + (t / 10) as u32;
+                    let e = Enemy { x: first.x as f64 + 0.5, y: first.y as f64 + 0.5, speed_tps: speed, hp, spawned_at: t, path_index: 1 };
+                    new.enemies.push(e);
+                    new.last_enemy_spawn_time_secs = t;
+                }
+                // Advance enemies
+                if !new.path.is_empty() && dt > 0.0 {
+                    let path_clone = new.path.clone();
+                    let mut survivors: Vec<Enemy> = Vec::with_capacity(new.enemies.len());
+                    for mut e in new.enemies.drain(..) {
+                        let mut remaining = dt * e.speed_tps; // tiles to travel this frame
+                        while remaining > 0.0 && e.path_index < path_clone.len() {
+                            let wp = path_clone[e.path_index];
+                            let tx = wp.x as f64 + 0.5; let ty = wp.y as f64 + 0.5;
+                            let dx = tx - e.x; let dy = ty - e.y; let dist = (dx*dx + dy*dy).sqrt();
+                            if dist < 1e-6 { e.path_index += 1; continue; }
+                            if remaining >= dist { e.x = tx; e.y = ty; remaining -= dist; e.path_index += 1; } else { let ratio = remaining / dist; e.x += dx * ratio; e.y += dy * ratio; remaining = 0.0; }
+                        }
+                        if e.path_index >= path_clone.len() { if new.life > 0 { new.life -= 1; } if new.stats.loops_completed < u32::MAX { new.stats.loops_completed += 1; } } else { survivors.push(e); }
+                    }
+                    new.enemies = survivors;
+                }
+            }
+        }
+        Rc::new(new)
     }
 }
 
