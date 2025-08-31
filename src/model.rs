@@ -3,7 +3,6 @@
 //! TODOs are included to guide future implementation.
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::rc::Rc;
 use wasm_bindgen::JsValue;
 use yew::Reducible; // added for logging // re-add for debug logging
@@ -68,7 +67,6 @@ pub enum TileKind {
     Direction { dir: ArrowDir, role: DirRole },
     /// Indestructible tile (e.g., around Start to force entrance/exit).
     Indestructible,
-    /// Target/exit that completes a loop (reserved for future use).
     End,
 }
 
@@ -96,23 +94,16 @@ pub struct RunStats {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Enemy {
-    /// World position in tile units (center-based), updated by simulation.
     pub x: f64,
     pub y: f64,
-    /// Movement speed in tiles per second, fixed at spawn.
     pub speed_tps: f64,
-    /// Hit points, fixed at spawn.
     pub hp: u32,
-    /// The run time at which this enemy spawned.
     pub spawned_at: u64,
-    /// Index of the next waypoint in path the enemy is moving towards.
-    pub path_index: usize,
-    // visual variation
-    pub wobble_phase: f64,
-    pub wobble_amp: f64,
-    pub radius_scale: f64,
+    pub path_index: usize, // kept for minimal UI/debug compatibility (next node index)
     pub dir_dx: f64,
     pub dir_dy: f64,
+    pub radius_scale: f64,
+    pub loop_dist: f64, // continuous distance along loop polyline [0, loop_total_length)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -128,6 +119,8 @@ pub struct RunState {
     pub is_paused: bool,
     pub path: Vec<Position>,
     pub path_loop: Vec<Position>, // cyclic path including start/entrance/exit
+    pub loop_cum_lengths: Vec<f64>, // cumulative lengths per node (same length as path_loop)
+    pub loop_total_length: f64,
     pub enemies: Vec<Enemy>,
     pub last_enemy_spawn_time_secs: u64,
     pub version: u64,
@@ -288,11 +281,14 @@ impl RunState {
             currencies: Currencies::default(),
             stats: RunStats::default(),
             life: 200,
-            mining_speed: 1.0,
+            // Increase mining speed for faster testing (was 1.0)
+            mining_speed: 6.0,
             started: false,
             is_paused: false,
             path: Vec::new(),
             path_loop: Vec::new(),
+            loop_cum_lengths: Vec::new(),
+            loop_total_length: 0.0,
             enemies: Vec::new(),
             last_enemy_spawn_time_secs: 0,
             version: 0,
@@ -302,11 +298,44 @@ impl RunState {
         };
         rs.path = compute_path(&rs);
         rs.path_loop = build_loop_path(&rs);
+        update_loop_geometry(&mut rs);
         rs
     }
 }
 
 // ---------------- Pathfinding helpers -----------------
+// Replace BFS-based compute_path with A* (Manhattan heuristic)
+fn a_star_path(rs: &RunState, start: (i32,i32), goal: (i32,i32)) -> Vec<Position> {
+    let (sx,sy) = start; let (gx,gy) = goal;
+    let gs = rs.grid_size; let in_bounds = |x:i32,y:i32| x>=0 && y>=0 && (x as u32)<gs.width && (y as u32)<gs.height;
+    if !in_bounds(sx,sy) || !in_bounds(gx,gy) { return Vec::new(); }
+    // Only allow traversal through Empty tiles; exclude Start and Direction tiles to avoid ping-pong through them
+    let is_walkable = |idx:usize| matches!(rs.tiles[idx].kind, TileKind::Empty);
+    let start_idx = (sy as u32 * gs.width + sx as u32) as usize;
+    let goal_idx = (gy as u32 * gs.width + gx as u32) as usize;
+    if !is_walkable(start_idx) || !is_walkable(goal_idx) { return Vec::new(); }
+    use std::cmp::Ordering; use std::collections::{BinaryHeap,HashMap};
+    #[derive(Copy,Clone,Eq,PartialEq)] struct Node { f:u32, idx:usize }
+    impl Ord for Node { fn cmp(&self, other:&Self)->Ordering { other.f.cmp(&self.f).then_with(|| self.idx.cmp(&other.idx)) } }
+    impl PartialOrd for Node { fn partial_cmp(&self, o:&Self)->Option<Ordering>{ Some(self.cmp(o)) } }
+    let mut open = BinaryHeap::new();
+    let mut g: HashMap<usize,u32> = HashMap::new();
+    let mut parent: Vec<Option<usize>> = vec![None; (gs.width*gs.height) as usize];
+    let h = |x:i32,y:i32| ((x-gx).abs() + (y-gy).abs()) as u32; // Manhattan
+    g.insert(start_idx,0); open.push(Node{f:h(sx,sy), idx:start_idx});
+    let dirs = [(1,0),(-1,0),(0,1),(0,-1)];
+    while let Some(Node{idx, ..}) = open.pop() {
+        if idx==goal_idx { break; }
+        let gx0 = (idx as u32 % gs.width) as i32; let gy0 = (idx as u32 / gs.width) as i32;
+        let g_here = *g.get(&idx).unwrap();
+        for (dx,dy) in dirs { let nx=gx0+dx; let ny=gy0+dy; if !in_bounds(nx,ny){continue;} let nidx=(ny as u32 * gs.width + nx as u32) as usize; if !is_walkable(nidx){continue;} let tentative = g_here + 1; if tentative < *g.get(&nidx).unwrap_or(&u32::MAX) { g.insert(nidx,tentative); parent[nidx]=Some(idx); let f = tentative + h(nx,ny); open.push(Node{f,idx:nidx}); } }
+    }
+    if parent[goal_idx].is_none() && start_idx!=goal_idx { return Vec::new(); }
+    // reconstruct
+    let mut rev = Vec::new(); let mut cur = Some(goal_idx); while let Some(ci)=cur { rev.push(ci); if ci==start_idx { break; } cur = parent[ci]; }
+    rev.reverse(); rev.into_iter().map(|i| { let x=(i as u32 % gs.width) as u32; let y=(i as u32 / gs.width) as u32; Position{x,y} }).collect()
+}
+
 fn dir_to_delta(dir: ArrowDir) -> (i32, i32) {
     match dir {
         ArrowDir::Up => (0, -1),
@@ -337,93 +366,93 @@ fn find_entrance_exit(rs: &RunState) -> Option<((i32, i32, ArrowDir), (i32, i32,
     }
 }
 
+// Global preview path (entrance walkway start -> exit walkway end)
 pub fn compute_path(rs: &RunState) -> Vec<Position> {
+    let Some(((ex, ey, _edir), (xx, xy, _xdir))) = find_entrance_exit(rs) else { return Vec::new(); };
     let gs = rs.grid_size;
-    let Some(((ex, ey, edir), (xx, xy, xdir))) = find_entrance_exit(rs) else {
-        return Vec::new();
+    let in_bounds = |x:i32,y:i32| x>=0 && y>=0 && (x as u32) < gs.width && (y as u32) < gs.height;
+    let is_empty = |x:i32,y:i32| {
+        if !in_bounds(x,y) { return false; }
+        let idx = (y as u32 * gs.width + x as u32) as usize;
+        matches!(rs.tiles[idx].kind, TileKind::Empty)
     };
-    let (edx, edy) = dir_to_delta(edir);
-    let (xdx, xdy) = dir_to_delta(xdir);
-    let sx = ex + edx; // start from cell beyond entrance arrow
-    let sy = ey + edy;
-    let tx = xx - xdx; // end at cell before exit arrow (neighbor Empty ensured)
-    let ty = xy - xdy;
-    let in_bounds =
-        |x: i32, y: i32| x >= 0 && y >= 0 && (x as u32) < gs.width && (y as u32) < gs.height;
-    if !in_bounds(sx, sy) || !in_bounds(tx, ty) {
-        return Vec::new();
-    }
-    let sidx = (sy as u32 * gs.width + sx as u32) as usize;
-    let tidx = (ty as u32 * gs.width + tx as u32) as usize;
-    let is_empty = |idx: usize| matches!(rs.tiles[idx].kind, TileKind::Empty);
-    if !is_empty(sidx) || !is_empty(tidx) {
-        return Vec::new();
-    }
-    let mut q: VecDeque<usize> = VecDeque::new();
-    let mut visited = vec![false; (gs.width * gs.height) as usize];
-    let mut parent: Vec<Option<usize>> = vec![None; (gs.width * gs.height) as usize];
-    visited[sidx] = true;
-    q.push_back(sidx);
-    let dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-    while let Some(idx) = q.pop_front() {
-        if idx == tidx {
-            break;
-        }
-        let x = (idx as u32 % gs.width) as i32;
-        let y = (idx as u32 / gs.width) as i32;
-        for (dx, dy) in dirs {
-            let nx = x + dx;
-            let ny = y + dy;
-            if !in_bounds(nx, ny) {
-                continue;
-            }
-            let nidx = (ny as u32 * gs.width + nx as u32) as usize;
-            if visited[nidx] {
-                continue;
-            }
-            if !is_empty(nidx) {
-                continue;
-            }
-            visited[nidx] = true;
-            parent[nidx] = Some(idx);
-            q.push_back(nidx);
-        }
-    }
-    if !visited[tidx] {
-        return Vec::new();
-    }
-    let mut path_rev: Vec<usize> = Vec::new();
-    let mut cur = Some(tidx);
-    while let Some(ci) = cur {
-        path_rev.push(ci);
-        cur = parent[ci];
-    }
-    path_rev.reverse();
-    path_rev
-        .into_iter()
-        .map(|i| {
-            let x = (i as u32 % gs.width) as u32;
-            let y = (i as u32 / gs.width) as u32;
-            Position { x, y }
-        })
-        .collect()
+    // Collect candidate start neighbors (empties adjacent to entrance direction tile)
+    let mut starts: Vec<(i32,i32)> = Vec::new();
+    for (dx,dy) in [(1,0),(-1,0),(0,1),(0,-1)] { let nx=ex+dx; let ny=ey+dy; if is_empty(nx,ny) { starts.push((nx,ny)); } }
+    // Collect candidate goal neighbors (empties adjacent to exit direction tile)
+    let mut goals: Vec<(i32,i32)> = Vec::new();
+    for (dx,dy) in [(1,0),(-1,0),(0,1),(0,-1)] { let nx=xx+dx; let ny=xy+dy; if is_empty(nx,ny) { goals.push((nx,ny)); } }
+    if starts.is_empty() || goals.is_empty() { return Vec::new(); }
+    // Evaluate all start->goal pairs; pick shortest non-empty path
+    let mut best: Option<Vec<Position>> = None;
+    let mut best_len = usize::MAX;
+    for (sx,sy) in &starts { for (gx,gy) in &goals { if sx==gx && sy==gy { continue; } let path = a_star_path(rs, (*sx,*sy), (*gx,*gy)); if path.len()>1 && path.len() < best_len { best_len = path.len(); best = Some(path); } } }
+    best.unwrap_or_default()
 }
 
 fn build_loop_path(rs: &RunState) -> Vec<Position> {
-    // New ordering: Start -> Entrance direction tile -> linear path nodes -> Exit direction tile (cyclic wrap back to Start)
-    // rs.path still represents linear empty cells beyond entrance arrow through before exit arrow.
-    let mut start_pos: Option<Position> = None;
-    let mut entrance_pos: Option<Position> = None;
-    let mut exit_pos: Option<Position> = None;
-    for y in 0..rs.grid_size.height { for x in 0..rs.grid_size.width { let idx=(y*rs.grid_size.width + x) as usize; match rs.tiles[idx].kind { TileKind::Start => start_pos = Some(Position{x,y}), TileKind::Direction{dir:_, role} => { match role { DirRole::Entrance => entrance_pos = Some(Position{x,y}), DirRole::Exit => exit_pos = Some(Position{x,y}), } }, _=>{} } } }
-    let (Some(start), Some(ent), Some(exit)) = (start_pos, entrance_pos, exit_pos) else { return rs.path.clone(); };
-    let mut loop_vec = Vec::new();
-    loop_vec.push(start);
-    if ent.x!=start.x || ent.y!=start.y { loop_vec.push(ent); }
-    // append linear path nodes (already excludes direction tiles)
-    for p in &rs.path { loop_vec.push(*p); }
-    if exit.x!=loop_vec.last().map(|p| (p.x,p.y)).unwrap_or((u32::MAX,u32::MAX)).0 || exit.y!=loop_vec.last().unwrap().y { loop_vec.push(exit); }
-    loop_vec
+    // Build cyclic ordered nodes: Start -> EntranceDir -> path (entrance->exit cells) -> ExitDir
+    let mut start_pos=None; let mut ent_dir_tile=None; let mut exit_dir_tile=None;
+    for y in 0..rs.grid_size.height { for x in 0..rs.grid_size.width { let idx=(y*rs.grid_size.width + x) as usize; match rs.tiles[idx].kind { TileKind::Start => start_pos=Some(Position{x,y}), TileKind::Direction{dir:_, role} => match role { DirRole::Entrance => ent_dir_tile=Some(Position{x,y}), DirRole::Exit => exit_dir_tile=Some(Position{x,y}), }, _=>{} } } }
+    let (Some(start), Some(ent), Some(exit)) = (start_pos, ent_dir_tile, exit_dir_tile) else { return Vec::new(); };
+    let mut loop_nodes = Vec::new();
+    loop_nodes.push(start);
+    if loop_nodes.last().unwrap()!=&ent { loop_nodes.push(ent); }
+    // path should only contain empty tiles between entrance and exit (already enforced by a_star_path)
+    for p in &rs.path { if p!=&start && p!=&ent && p!=&exit { loop_nodes.push(*p); } }
+    if loop_nodes.last().unwrap()!=&exit { loop_nodes.push(exit); }
+    // Clean: remove immediate duplicates
+    let mut cleaned: Vec<Position> = Vec::with_capacity(loop_nodes.len());
+    for node in loop_nodes.into_iter() { if cleaned.last()==Some(&node) { continue; } cleaned.push(node); }
+    // Remove immediate reversals A,B,A -> drop middle B (or second A?). We want monotonic forward progression; remove the middle node causing reversal pattern B.
+    let mut no_reversal: Vec<Position> = Vec::with_capacity(cleaned.len());
+    for n in cleaned.into_iter() {
+        if no_reversal.len() >= 2 {
+            let a = no_reversal[no_reversal.len()-2];
+            let _b = no_reversal[no_reversal.len()-1];
+            if a.x==n.x && a.y==n.y { // pattern A,B,A -> drop B
+                no_reversal.pop(); // remove B
+            }
+        }
+        no_reversal.push(n);
+    }
+    no_reversal
+}
+
+fn update_loop_geometry(rs: &mut RunState) {
+    rs.loop_cum_lengths.clear();
+    rs.loop_total_length = 0.0;
+    if rs.path_loop.len() < 2 { return; }
+    rs.loop_cum_lengths.reserve(rs.path_loop.len());
+    rs.loop_cum_lengths.push(0.0);
+    let mut acc = 0.0;
+    for i in 1..rs.path_loop.len() {
+        let a = rs.path_loop[i-1];
+        let b = rs.path_loop[i];
+        let dx = b.x as f64 - a.x as f64;
+        let dy = b.y as f64 - a.y as f64;
+        let seg = (dx*dx+dy*dy).sqrt();
+        acc += seg;
+        rs.loop_cum_lengths.push(acc);
+    }
+    // add implicit closing segment from last back to first
+    let first = rs.path_loop[0];
+    let last = *rs.path_loop.last().unwrap();
+    let dx = first.x as f64 - last.x as f64;
+    let dy = first.y as f64 - last.y as f64;
+    let closing = (dx*dx+dy*dy).sqrt();
+    rs.loop_total_length = acc + closing;
+}
+
+fn project_distance_on_loop(rs: &RunState, x: f64, y: f64) -> (f64,f64,f64,usize) {
+    project_distance_on_loop_snapshot(&rs.path_loop,&rs.loop_cum_lengths,rs.loop_total_length,x,y)
+}
+fn project_distance_on_loop_snapshot(nodes: &Vec<Position>, cum: &Vec<f64>, total: f64, x: f64, y:f64) -> (f64,f64,f64,usize) {
+    let n = nodes.len();
+    if n<2 || total<=1e-9 { return (0.0,1.0,0.0,0); }
+    let mut best_d2=f64::MAX; let mut best=(0.0,1.0,0.0,1usize);
+    for i in 0..n { let a=nodes[i]; let b=nodes[(i+1)%n]; let ax=a.x as f64+0.5; let ay=a.y as f64+0.5; let bx=b.x as f64+0.5; let by=b.y as f64+0.5; let dx=bx-ax; let dy=by-ay; let seg_len2=dx*dx+dy*dy; if seg_len2<1e-12 { continue; } let t=((x-ax)*dx+(y-ay)*dy)/seg_len2; let tc=t.clamp(0.0,1.0); let px=ax+dx*tc; let py=ay+dy*tc; let d2=(px-x)*(px-x)+(py-y)*(py-y); if d2<best_d2 { best_d2=d2; let seg_len=seg_len2.sqrt(); let mut loop_dist=(if i==0 {0.0}else{cum[i]})+ seg_len*tc; if i==n-1 { let closing_start= total - seg_len; loop_dist = closing_start + seg_len*tc; } let mag=seg_len.max(1e-6); best=(loop_dist%total, dx/mag, dy/mag, (i+1)%n); } }
+    best
 }
 
 // ---------------- Reducer & Actions -----------------
@@ -478,7 +507,15 @@ impl Reducible for RunState {
                         }
                         new.path = compute_path(&new);
                         new.path_loop = build_loop_path(&new);
-                        adjust_enemies_after_path_change(&mut new);
+                        update_loop_geometry(&mut new);
+                        // snapshot geometry for projection to avoid borrow conflict
+                        let nodes = new.path_loop.clone();
+                        let cum = new.loop_cum_lengths.clone();
+                        let total = new.loop_total_length;
+                        for e in &mut new.enemies {
+                            let (d,dx,dy,next_i) = project_distance_on_loop_snapshot(&nodes,&cum,total,e.x,e.y);
+                            e.loop_dist=d; e.dir_dx=dx; e.dir_dy=dy; e.path_index=next_i;
+                        }
                         if !new.path.is_empty() {
                             let last_index = new.path.len().saturating_sub(1);
                             for e in &mut new.enemies {
@@ -498,51 +535,52 @@ impl Reducible for RunState {
                 if !(new.started && !new.is_paused && !new.game_over) { return self; }
                 new.sim_time += dt;
                 if new.path.is_empty() { new.path = compute_path(&new); }
-                if new.path_loop.len() < 2 { new.path_loop = build_loop_path(&new); }
-                // Move enemies along cyclic path_loop
-                if !new.path_loop.is_empty() && dt > 0.0 && !new.enemies.is_empty() {
-                    let loop_nodes = new.path_loop.clone();
-                    let len = loop_nodes.len();
+                let old_nodes = new.path_loop.clone();
+                let recomputed = build_loop_path(&new);
+                if recomputed != old_nodes { new.path_loop = recomputed; update_loop_geometry(&mut new); let nodes=new.path_loop.clone(); let cum=new.loop_cum_lengths.clone(); let total=new.loop_total_length; for e in &mut new.enemies { let (d,dx,dy,next_i)=project_distance_on_loop_snapshot(&nodes,&cum,total,e.x,e.y); e.loop_dist=d; e.dir_dx=dx; e.dir_dy=dy; e.path_index=next_i; } }
+                let total_len = new.loop_total_length;
+                if total_len > 1e-6 && dt>0.0 {
+                    // snapshot geometry for movement
+                    let nodes = new.path_loop.clone();
+                    let cum = new.loop_cum_lengths.clone();
+                    let n = nodes.len();
                     for e in &mut new.enemies {
-                        let old_x = e.x; let old_y = e.y; // store start pos for direction delta
-                        if len==0 { break; }
-                        if e.path_index >= len { e.path_index %= len; }
-                        let mut remaining = dt * e.speed_tps;
-                        while remaining > 0.0 && new.life > 0 {
-                            let target = loop_nodes[e.path_index];
-                            let tx = target.x as f64 + 0.5; let ty = target.y as f64 + 0.5;
-                            let dx = tx - e.x; let dy = ty - e.y; let dist = (dx*dx + dy*dy).sqrt();
-                            if dist < 1e-6 {
-                                e.path_index += 1;
-                                if e.path_index >= len { e.path_index = 0; if new.life>0 { new.life -=1; } if new.stats.loops_completed < u32::MAX { new.stats.loops_completed +=1; } if new.life==0 { break; } }
-                                continue;
+                        let prev_dist = e.loop_dist;
+                        e.loop_dist = (e.loop_dist + e.speed_tps * dt) % total_len;
+                        if e.loop_dist < prev_dist { if new.life>0 { new.life = new.life.saturating_sub(1); if new.stats.loops_completed < u32::MAX { new.stats.loops_completed +=1; } } if new.life==0 { break; } }
+                        if n < 2 { continue; }
+                        // find segment index
+                        let seg_index = if e.loop_dist < cum[n-1] {
+                            match cum.binary_search_by(|probe| probe.partial_cmp(&e.loop_dist).unwrap()) {
+                                Ok(pos) => if pos==0 {0} else {pos-1},
+                                Err(pos) => if pos==0 {0} else {pos-1},
                             }
-                            if remaining >= dist { e.x = tx; e.y = ty; remaining -= dist; }
-                            else { let ratio = remaining / dist; e.x += dx*ratio; e.y += dy*ratio; remaining = 0.0; }
-                        }
-                        // smooth direction based on displacement
-                        let raw_dx = e.x - old_x; let raw_dy = e.y - old_y; let raw_mag = (raw_dx*raw_dx + raw_dy*raw_dy).sqrt();
-                        if raw_mag > 1e-5 { let ndx = raw_dx/raw_mag; let ndy = raw_dy/raw_mag; // blend
-                            let blend = 0.25; e.dir_dx = (1.0-blend)*e.dir_dx + blend*ndx; e.dir_dy = (1.0-blend)*e.dir_dy + blend*ndy; // renormalize
-                            let nmag = (e.dir_dx*e.dir_dx + e.dir_dy*e.dir_dy).sqrt(); if nmag>1e-6 { e.dir_dx/=nmag; e.dir_dy/=nmag; }
-                        }
+                        } else { n-1 }; // closing segment
+                        let a = nodes[seg_index];
+                        let b = nodes[(seg_index+1)%n];
+                        let ax = a.x as f64 + 0.5; let ay = a.y as f64 + 0.5;
+                        let bx = b.x as f64 + 0.5; let by = b.y as f64 + 0.5;
+                        let seg_dx = bx-ax; let seg_dy = by-ay;
+                        let seg_len = if seg_index==n-1 { let dx=bx-ax; let dy=by-ay; (dx*dx+dy*dy).sqrt() } else { ((b.x as f64 - a.x as f64).powi(2)+(b.y as f64 - a.y as f64).powi(2)).sqrt()}.max(1e-9);
+                        let base = if seg_index==n-1 { cum[n-1] } else { cum[seg_index] };
+                        let local = e.loop_dist - base;
+                        let t = (local/seg_len).clamp(0.0,1.0);
+                        e.x = ax + seg_dx * t; e.y = ay + seg_dy * t;
+                        e.dir_dx = seg_dx/seg_len; e.dir_dy = seg_dy/seg_len; e.path_index=(seg_index+1)%n;
                     }
                 }
-                // Spawn logic uses first node of loop if available
-                let t = new.stats.time_survived_secs;
-                let path_available = if !new.path_loop.is_empty() { new.path_loop.len() } else { new.path.len() };
-                let need_spawn = path_available >= 1 && (new.enemies.is_empty() || t.saturating_sub(new.last_enemy_spawn_time_secs) >= 2);
-                if need_spawn {
-                    let speed = 1.0 + 0.002 * (t as f64);
-                    let hp = 5 + (t / 10) as u32;
-                    let phase = js_sys::Math::random() * std::f64::consts::TAU;
-                    let amp = 0.08 + js_sys::Math::random()*0.06; // 0.08..0.14 tiles
-                    let rscale = 0.85 + js_sys::Math::random()*0.3; // 0.85..1.15
-                    let (init_dx, init_dy) = if new.path_loop.len() > 1 { let a=new.path_loop[0]; let b=new.path_loop[1]; let mut dx = b.x as f64 - a.x as f64; let mut dy = b.y as f64 - a.y as f64; let mag=(dx*dx+dy*dy).sqrt(); if mag>1e-6 { dx/=mag; dy/=mag; } (dx,dy) } else { (1.0,0.0) };
-                    // Spawn at Start tile center (path_loop[0]) and target next waypoint (index 1 if exists)
-                    let path_index = if new.path_loop.len() > 1 { 1 } else { 0 };
-                    new.enemies.push(Enemy { x: new.path_loop[0].x as f64 + 0.5, y: new.path_loop[0].y as f64 + 0.5, speed_tps: speed, hp, spawned_at: t, path_index, wobble_phase: phase, wobble_amp: amp, radius_scale: rscale, dir_dx: init_dx, dir_dy: init_dy });
-                    new.last_enemy_spawn_time_secs = t;
+                // Spawn logic
+                if new.life > 0 {
+                    let t = new.stats.time_survived_secs;
+                    let need_spawn = new.path_loop.len() >= 2 && (new.enemies.is_empty() || t.saturating_sub(new.last_enemy_spawn_time_secs) >= 2);
+                    if need_spawn {
+                        if let Some(first) = new.path_loop.get(0) { if let Some(second)= new.path_loop.get(1) {
+                            let mut dx = second.x as f64 - first.x as f64; let mut dy = second.y as f64 - first.y as f64; let mag=(dx*dx+dy*dy).sqrt(); if mag>1e-6 { dx/=mag; dy/=mag; }
+                            let speed = 1.0 + 0.002 * (t as f64); let hp = 5 + (t / 10) as u32; let rscale = 0.85 + js_sys::Math::random()*0.3;
+                            new.enemies.push(Enemy { x: first.x as f64 + 0.5, y: first.y as f64 + 0.5, speed_tps: speed, hp, spawned_at: t, path_index:1, dir_dx:dx, dir_dy:dy, radius_scale:rscale, loop_dist:0.0 });
+                            new.last_enemy_spawn_time_secs = t; }
+                        }
+                    }
                 }
                 if new.life == 0 && !new.game_over { new.game_over = true; new.is_paused = true; }
             }
@@ -563,45 +601,9 @@ pub struct UpgradeState {
 
 // TODO: Implement BFS/A* pathfinding utilities ensuring Start->End remains reachable when placing walls.
 // TODO: Add persistence helpers (e.g., serialize/deserialize UpgradeState to localStorage via gloo-storage).
-fn adjust_enemies_after_path_change(rs: &mut RunState) {
-    if rs.enemies.is_empty() { return; }
-    let nodes = if !rs.path_loop.is_empty() { &rs.path_loop } else { &rs.path };
-    let len = nodes.len();
-    if len == 0 { return; }
-    let gs = rs.grid_size;
-    let in_bounds = |x: i32, y: i32| x >= 0 && y >= 0 && (x as u32) < gs.width && (y as u32) < gs.height;
-    let is_walkable = |tile: &TileKind| matches!(tile, TileKind::Empty | TileKind::Start | TileKind::Direction{..});
-    // Precompute a map from (x,y) -> node index for O(1) target detection
-    let mut node_map = vec![usize::MAX; (gs.width * gs.height) as usize];
-    for (i,n) in nodes.iter().enumerate() { let idx = (n.y * gs.width + n.x) as usize; node_map[idx] = i; }
-    for e in &mut rs.enemies {
-        let prev_node = if e.path_index == 0 { len.saturating_sub(1) } else { e.path_index - 1 };
-        let ex_tile = e.x.floor() as i32; let ey_tile = e.y.floor() as i32;
-        if !in_bounds(ex_tile, ey_tile) { continue; }
-        let start_idx = (ey_tile as u32 * gs.width + ex_tile as u32) as usize;
-        use std::collections::VecDeque;
-        let mut q = VecDeque::new();
-        let mut visited = vec![false; (gs.width * gs.height) as usize];
-        q.push_back(start_idx); visited[start_idx]=true;
-        let mut found_node: Option<usize> = None;
-        while let Some(idx) = q.pop_front() {
-            let node_id = node_map[idx];
-            if node_id != usize::MAX { found_node = Some(node_id); break; }
-            let x = (idx as u32 % gs.width) as i32; let y = (idx as u32 / gs.width) as i32;
-            for (dx,dy) in [(1,0),(-1,0),(0,1),(0,-1)] { let nx=x+dx; let ny=y+dy; if !in_bounds(nx,ny){continue;} let nidx=(ny as u32 * gs.width + nx as u32) as usize; if visited[nidx]{continue;} if !is_walkable(&rs.tiles[nidx].kind){continue;} visited[nidx]=true; q.push_back(nidx);}        }
-        if let Some(mut node_i) = found_node {
-            // compute forward distance from prev_node to candidate (cyclic)
-            let forward_dist = if node_i >= prev_node { node_i - prev_node } else { node_i + len - prev_node };
-            let backward_dist = if prev_node >= node_i { prev_node - node_i } else { prev_node + len - node_i };
-            // If candidate is strictly behind and not a simple wrap (forward_dist > backward_dist), keep previous node
-            if backward_dist < forward_dist && backward_dist > 0 { node_i = prev_node; }
-            let pos = nodes[node_i];
-            e.x = pos.x as f64 + 0.5; e.y = pos.y as f64 + 0.5;
-            e.path_index = if len > 1 { (node_i + 1) % len } else { 0 };
-        } else {
-            let mut best = prev_node; let mut best_d2 = f64::MAX;
-            for (i,n) in nodes.iter().enumerate(){ let dx=(n.x as f64+0.5)-e.x; let dy=(n.y as f64+0.5)-e.y; let d2=dx*dx+dy*dy; if d2<best_d2 { best_d2=d2; best=i; } }
-            let pos = nodes[best]; e.x = pos.x as f64 + 0.5; e.y = pos.y as f64 + 0.5; e.path_index = if len>1 { (best+1)%len } else {0};
-        }
-    }
+fn reattach_enemies_to_loop(rs: &mut RunState) {
+    if rs.path_loop.len() < 2 { return; }
+    update_loop_geometry(rs);
+    let nodes = rs.path_loop.clone(); let cum=rs.loop_cum_lengths.clone(); let total=rs.loop_total_length;
+    for e in &mut rs.enemies { let (d,dx,dy,next_i)=project_distance_on_loop_snapshot(&nodes,&cum,total,e.x,e.y); e.loop_dist=d; e.dir_dx=dx; e.dir_dy=dy; e.path_index=next_i; }
 }
