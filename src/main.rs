@@ -1,9 +1,12 @@
+#![allow(unused_mut)]
 use std::cell::RefCell; // added for RAF id storage
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlElement, KeyboardEvent, TouchEvent};
+use web_sys::{
+    CanvasRenderingContext2d, HtmlCanvasElement, HtmlElement, KeyboardEvent, TouchEvent,
+};
 use yew::prelude::*; // added
 
 mod model;
@@ -56,7 +59,9 @@ fn run_view(props: &RunViewProps) -> Html {
         let show_path_flag_ref = show_path_flag.clone();
         use_effect_with(flag, move |_| {
             *show_path_flag_ref.borrow_mut() = flag;
-            if let Some(f) = &*draw_ref.borrow() { f(); }
+            if let Some(f) = &*draw_ref.borrow() {
+                f();
+            }
             || ()
         });
     }
@@ -171,10 +176,11 @@ fn run_view(props: &RunViewProps) -> Html {
                     let rs = (**rs_handle).clone();
                     let show_path_on = *show_path_flag.borrow();
                     // Clear & set transform (always same background)
-                    ctx.set_transform(1.0,0.0,0.0,1.0,0.0,0.0).ok();
+                    ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0).ok();
                     ctx.set_fill_style_str("#0e1116");
-                    ctx.fill_rect(0.0,0.0,w,h);
-                    ctx.set_transform(scale_px,0.0,0.0,scale_px,cam.offset_x,cam.offset_y).ok();
+                    ctx.fill_rect(0.0, 0.0, w, h);
+                    ctx.set_transform(scale_px, 0.0, 0.0, scale_px, cam.offset_x, cam.offset_y)
+                        .ok();
                     let gs = rs.grid_size;
                     ctx.set_fill_style_str("#161b22");
                     ctx.fill_rect(0.0, 0.0, gs.width as f64, gs.height as f64);
@@ -218,6 +224,17 @@ fn run_view(props: &RunViewProps) -> Html {
                                     ctx.set_line_width((1.0 / scale_px).max(0.001));
                                     ctx.stroke_rect(rx, ry, rw, rh);
                                 }
+                                model::TileKind::Wall => {
+                                    let rx = x as f64 + margin;
+                                    let ry = y as f64 + margin;
+                                    let rw = 1.0 - 2.0 * margin;
+                                    let rh = rw;
+                                    ctx.set_fill_style_str("#2a2f38");
+                                    ctx.fill_rect(rx, ry, rw, rh);
+                                    ctx.set_stroke_style_str("#555e6b");
+                                    ctx.set_line_width((1.0 / scale_px).max(0.001));
+                                    ctx.stroke_rect(rx, ry, rw, rh);
+                                }
                                 model::TileKind::Start => {
                                     // Uniform path background + start marker
                                     let rx = x as f64;
@@ -225,21 +242,26 @@ fn run_view(props: &RunViewProps) -> Html {
                                     ctx.set_fill_style_str("#082235");
                                     ctx.fill_rect(rx, ry, 1.0, 1.0);
                                     // Spawn marker (ringed circle)
-                                    let cx = rx + 0.5; let cy = ry + 0.5;
+                                    let cx = rx + 0.5;
+                                    let cy = ry + 0.5;
                                     ctx.begin_path();
                                     ctx.set_fill_style_str("#58a6ff");
-                                    ctx.arc(cx, cy, 0.30, 0.0, std::f64::consts::PI*2.0).ok();
+                                    ctx.arc(cx, cy, 0.30, 0.0, std::f64::consts::PI * 2.0).ok();
                                     ctx.fill();
                                     ctx.set_stroke_style_str("#1f6feb");
-                                    ctx.set_line_width((1.2/scale_px).max(0.001));
+                                    ctx.set_line_width((1.2 / scale_px).max(0.001));
                                     ctx.stroke();
                                 }
                                 model::TileKind::Direction { dir, role } => {
                                     // Uniform path background + directional arrow overlay
-                                    let rx = x as f64; let ry = y as f64;
+                                    let rx = x as f64;
+                                    let ry = y as f64;
                                     ctx.set_fill_style_str("#082235");
                                     ctx.fill_rect(rx, ry, 1.0, 1.0);
-                                    let color = match role { model::DirRole::Entrance => "#2ea043", model::DirRole::Exit => "#f0883e" };
+                                    let color = match role {
+                                        model::DirRole::Entrance => "#2ea043",
+                                        model::DirRole::Exit => "#f0883e",
+                                    };
                                     ctx.set_fill_style_str(color);
                                     ctx.begin_path();
                                     match dir {
@@ -295,7 +317,8 @@ fn run_view(props: &RunViewProps) -> Html {
                         let radius = 0.28 * e.radius_scale;
                         ctx.begin_path();
                         ctx.set_fill_style_str("#00eaff");
-                        ctx.arc(e.x, e.y, radius, 0.0, std::f64::consts::PI * 2.0).ok();
+                        ctx.arc(e.x, e.y, radius, 0.0, std::f64::consts::PI * 2.0)
+                            .ok();
                         ctx.fill();
                         ctx.set_stroke_style_str("#a80032");
                         ctx.stroke();
@@ -319,22 +342,38 @@ fn run_view(props: &RunViewProps) -> Html {
                     }
                     // Optional path visualization: simple polyline only
                     if show_path_on {
-                        let path_for_draw: Vec<model::Position> = if !rs.path_loop.is_empty() { rs.path_loop.clone() } else { rs.path.clone() };
+                        let path_for_draw: Vec<model::Position> = if !rs.path_loop.is_empty() {
+                            rs.path_loop.clone()
+                        } else {
+                            rs.path.clone()
+                        };
                         if path_for_draw.is_empty() {
                             // Optional small notice (can be removed if not desired)
-                            ctx.set_transform(1.0,0.0,0.0,1.0,0.0,0.0).ok();
+                            ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0).ok();
                             ctx.set_fill_style_str("rgba(255,80,80,0.9)");
                             ctx.set_font("12px sans-serif");
                             ctx.fill_text("No path", 10.0, 40.0).ok();
-                            ctx.set_transform(scale_px,0.0,0.0,scale_px,cam.offset_x,cam.offset_y).ok();
+                            ctx.set_transform(
+                                scale_px,
+                                0.0,
+                                0.0,
+                                scale_px,
+                                cam.offset_x,
+                                cam.offset_y,
+                            )
+                            .ok();
                         } else if path_for_draw.len() >= 2 {
                             ctx.set_stroke_style_str("#ff66ff");
-                            ctx.set_line_width((2.5/scale_px).max(0.002));
+                            ctx.set_line_width((2.5 / scale_px).max(0.002));
                             ctx.begin_path();
-                            for (i,node) in path_for_draw.iter().enumerate() {
+                            for (i, node) in path_for_draw.iter().enumerate() {
                                 let cx = node.x as f64 + 0.5;
                                 let cy = node.y as f64 + 0.5;
-                                if i==0 { ctx.move_to(cx,cy); } else { ctx.line_to(cx,cy); }
+                                if i == 0 {
+                                    ctx.move_to(cx, cy);
+                                } else {
+                                    ctx.line_to(cx, cy);
+                                }
                             }
                             ctx.stroke();
                         }
@@ -352,17 +391,35 @@ fn run_view(props: &RunViewProps) -> Html {
                 let raf_id_clone = raf_id.clone();
                 let draw_ref_loop = draw_ref_setup.clone();
                 let window_loop = window.clone();
-                let closure_cell: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+                let closure_cell: Rc<RefCell<Option<Closure<dyn FnMut()>>>> =
+                    Rc::new(RefCell::new(None));
                 let closure_cell_clone = closure_cell.clone();
                 *closure_cell.borrow_mut() = Some(Closure::wrap(Box::new(move || {
-                    if let Some(f) = &*draw_ref_loop.borrow() { f(); }
+                    if let Some(f) = &*draw_ref_loop.borrow() {
+                        f();
+                    }
                     // schedule next frame
-                    if let Ok(id) = window_loop.request_animation_frame(closure_cell_clone.borrow().as_ref().unwrap().as_ref().unchecked_ref()) {
+                    if let Ok(id) = window_loop.request_animation_frame(
+                        closure_cell_clone
+                            .borrow()
+                            .as_ref()
+                            .unwrap()
+                            .as_ref()
+                            .unchecked_ref(),
+                    ) {
                         *raf_id_clone.borrow_mut() = Some(id);
                     }
-                }) as Box<dyn FnMut()>));
+                })
+                    as Box<dyn FnMut()>));
                 // kick off
-                if let Ok(id) = window.request_animation_frame(closure_cell.borrow().as_ref().unwrap().as_ref().unchecked_ref()) {
+                if let Ok(id) = window.request_animation_frame(
+                    closure_cell
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unchecked_ref(),
+                ) {
                     *raf_id.borrow_mut() = Some(id);
                 }
                 // store closure_cell & raf_id in canvas dataset? not needed; captured by cleanup
@@ -375,27 +432,61 @@ fn run_view(props: &RunViewProps) -> Html {
                 let mining = mining_setup.clone();
                 Closure::wrap(Box::new(move || {
                     let mut m = mining.borrow_mut();
-                    if !m.active || !m.mouse_down { return; }
+                    if !m.active || !m.mouse_down {
+                        return;
+                    }
                     let rs_snap = (*run_state).clone();
-                    if rs_snap.is_paused { return; }
+                    if rs_snap.is_paused {
+                        return;
+                    }
                     let gs = rs_snap.grid_size;
-                    if m.tile_x < 0 || m.tile_y < 0 || (m.tile_x as u32) >= gs.width || (m.tile_y as u32) >= gs.height { m.active=false; return; }
+                    if m.tile_x < 0
+                        || m.tile_y < 0
+                        || (m.tile_x as u32) >= gs.width
+                        || (m.tile_y as u32) >= gs.height
+                    {
+                        m.active = false;
+                        return;
+                    }
                     let idx = (m.tile_y as u32 * gs.width + m.tile_x as u32) as usize;
                     if let model::TileKind::Rock { .. } = rs_snap.tiles[idx].kind {
                         m.elapsed_secs += 0.016;
                         m.progress = (m.elapsed_secs / m.required_secs).min(1.0);
-                        if m.progress >= 1.0 { run_state.dispatch(RunAction::MiningComplete { idx }); m.active=false; m.mouse_down=false; m.progress=0.0; m.elapsed_secs=0.0; } else if !rs_snap.started { run_state.dispatch(RunAction::StartRun); }
-                    } else { m.active=false; m.mouse_down=false; }
-                }) as Box<dyn FnMut()> )
+                        if m.progress >= 1.0 {
+                            run_state.dispatch(RunAction::MiningComplete { idx });
+                            m.active = false;
+                            m.mouse_down = false;
+                            m.progress = 0.0;
+                            m.elapsed_secs = 0.0;
+                        } else if !rs_snap.started {
+                            run_state.dispatch(RunAction::StartRun);
+                        }
+                    } else {
+                        m.active = false;
+                        m.mouse_down = false;
+                    }
+                }) as Box<dyn FnMut()>)
             };
-            let mining_tick_id = window.set_interval_with_callback_and_timeout_and_arguments_0(mining_tick.as_ref().unchecked_ref(),16).unwrap();
+            let mining_tick_id = window
+                .set_interval_with_callback_and_timeout_and_arguments_0(
+                    mining_tick.as_ref().unchecked_ref(),
+                    16,
+                )
+                .unwrap();
 
             // Simulation tick (enemy movement & spawning)
             let sim_tick = {
                 let run_state = run_state.clone();
-                Closure::wrap(Box::new(move || { run_state.dispatch(RunAction::SimTick { dt: 0.016 }); }) as Box<dyn FnMut()>)
+                Closure::wrap(Box::new(move || {
+                    run_state.dispatch(RunAction::SimTick { dt: 0.016 });
+                }) as Box<dyn FnMut()>)
             };
-            let sim_tick_id = window.set_interval_with_callback_and_timeout_and_arguments_0(sim_tick.as_ref().unchecked_ref(),16).unwrap();
+            let sim_tick_id = window
+                .set_interval_with_callback_and_timeout_and_arguments_0(
+                    sim_tick.as_ref().unchecked_ref(),
+                    16,
+                )
+                .unwrap();
 
             // Wheel
             let wheel_cb = {
@@ -450,21 +541,31 @@ fn run_view(props: &RunViewProps) -> Html {
                         let ty = world_y.floor() as i32;
                         if tx >= 0 && ty >= 0 && (tx as u32) < gs.width && (ty as u32) < gs.height {
                             let idx = (ty as u32 * gs.width + tx as u32) as usize;
-                            if let model::TileKind::Rock { .. } = rs.tiles[idx].kind {
-                                if !rs.started {
-                                    run_state.dispatch(RunAction::StartRun);
+                            match rs.tiles[idx].kind {
+                                model::TileKind::Rock { .. } => {
+                                    if !rs.started {
+                                        run_state.dispatch(RunAction::StartRun);
+                                    }
+                                    let mut m = mining.borrow_mut();
+                                    m.tile_x = tx;
+                                    m.tile_y = ty;
+                                    let hardness = rs.tiles[idx].hardness.max(1) as f64;
+                                    let spd = rs.mining_speed.max(0.0001);
+                                    m.required_secs = hardness / spd;
+                                    m.elapsed_secs = 0.0;
+                                    m.progress = 0.0;
+                                    m.active = true;
+                                    m.mouse_down = true;
+                                    drop(m);
                                 }
-                                let mut m = mining.borrow_mut();
-                                m.tile_x = tx;
-                                m.tile_y = ty;
-                                let hardness = rs.tiles[idx].hardness.max(1) as f64;
-                                let spd = rs.mining_speed.max(0.0001);
-                                m.required_secs = hardness / spd;
-                                m.elapsed_secs = 0.0;
-                                m.progress = 0.0;
-                                m.active = true;
-                                m.mouse_down = true;
-                                drop(m);
+                                model::TileKind::Empty => {
+                                    // attempt to place wall
+                                    run_state.dispatch(RunAction::PlaceWall {
+                                        x: tx as u32,
+                                        y: ty as u32,
+                                    });
+                                }
+                                _ => {}
                             }
                         }
                     } else {
@@ -543,16 +644,17 @@ fn run_view(props: &RunViewProps) -> Html {
                                             m.active = true;
                                         }
                                     }
+                                    model::TileKind::Empty => {
+                                        // ignore while dragging mining over empty
+                                    }
                                     _ => {
                                         m.active = false;
-                                        m.progress = 0.0;
-                                        m.elapsed_secs = 0.0;
+                                        m.mouse_down = false;
                                     }
                                 }
                             } else {
                                 m.active = false;
-                                m.progress = 0.0;
-                                m.elapsed_secs = 0.0;
+                                m.mouse_down = false;
                             }
                         }
                     }
@@ -635,38 +737,95 @@ fn run_view(props: &RunViewProps) -> Html {
                         let cx = t0.client_x() as f64 - rect.left();
                         let cy = t0.client_y() as f64 - rect.top();
                         let mut cam = camera_tc.borrow_mut();
-                        let tile_px = 32.0; let scale_px = cam.zoom * tile_px;
-                        let world_x = (cx - cam.offset_x)/scale_px; let world_y = (cy - cam.offset_y)/scale_px;
+                        let tile_px = 32.0;
+                        let scale_px = cam.zoom * tile_px;
+                        let world_x = (cx - cam.offset_x) / scale_px;
+                        let world_y = (cy - cam.offset_y) / scale_px;
                         let mut ts = touch_state_tc.borrow_mut();
-                        ts.last_touch_x=cx; ts.last_touch_y=cy; ts.single_active=true; ts.pinch=false; drop(ts);
+                        ts.last_touch_x = cx;
+                        ts.last_touch_y = cy;
+                        ts.single_active = true;
+                        ts.pinch = false;
+                        drop(ts);
                         let rs_snap = (*run_state_tc).clone();
-                        if !rs_snap.is_paused && e.touches().length()==1 {
-                            let gs = rs_snap.grid_size; let tx = world_x.floor() as i32; let ty = world_y.floor() as i32;
-                            if tx>=0 && ty>=0 && (tx as u32)<gs.width && (ty as u32)<gs.height {
+                        if !rs_snap.is_paused && e.touches().length() == 1 {
+                            let gs = rs_snap.grid_size;
+                            let tx = world_x.floor() as i32;
+                            let ty = world_y.floor() as i32;
+                            if tx >= 0
+                                && ty >= 0
+                                && (tx as u32) < gs.width
+                                && (ty as u32) < gs.height
+                            {
                                 let idx = (ty as u32 * gs.width + tx as u32) as usize;
-                                if let model::TileKind::Rock { .. } = rs_snap.tiles[idx].kind {
-                                    if !rs_snap.started { run_state_tc.dispatch(RunAction::StartRun); }
-                                    let mut m = mining_tc.borrow_mut();
-                                    let hardness = rs_snap.tiles[idx].hardness.max(1) as f64; let spd = rs_snap.mining_speed.max(0.0001);
-                                    m.tile_x=tx; m.tile_y=ty; m.required_secs=hardness/spd; m.elapsed_secs=0.0; m.progress=0.0; m.active=true; m.mouse_down=true; drop(m);
-                                } else { cam.panning=true; cam.last_x=cx; cam.last_y=cy; }
+                                match rs_snap.tiles[idx].kind {
+                                    model::TileKind::Rock { .. } => {
+                                        if !rs_snap.started {
+                                            run_state_tc.dispatch(RunAction::StartRun);
+                                        }
+                                        let mut m = mining_tc.borrow_mut();
+                                        let hardness = rs_snap.tiles[idx].hardness.max(1) as f64;
+                                        let spd = rs_snap.mining_speed.max(0.0001);
+                                        m.tile_x = tx;
+                                        m.tile_y = ty;
+                                        m.required_secs = hardness / spd;
+                                        m.elapsed_secs = 0.0;
+                                        m.progress = 0.0;
+                                        m.active = true;
+                                        m.mouse_down = true;
+                                        drop(m);
+                                    }
+                                    model::TileKind::Empty => {
+                                        run_state_tc.dispatch(RunAction::PlaceWall {
+                                            x: tx as u32,
+                                            y: ty as u32,
+                                        });
+                                    }
+                                    _ => {
+                                        let mut cam = camera_tc.borrow_mut();
+                                        cam.panning = true;
+                                        cam.last_x = cx;
+                                        cam.last_y = cy;
+                                    }
+                                }
                             }
                         }
                         // pinch init
-                        if e.touches().length()>=2 { if let (Some(t1), Some(t0a))=(e.touches().item(1), e.touches().item(0)) {
-                            let x0=t0a.client_x() as f64 - rect.left(); let y0=t0a.client_y() as f64 - rect.top();
-                            let x1=t1.client_x() as f64 - rect.left(); let y1=t1.client_y() as f64 - rect.top();
-                            let dist = ((x1-x0).powi(2)+(y1-y0).powi(2)).sqrt().max(1.0);
-                            let midx=(x0+x1)*0.5; let midy=(y0+y1)*0.5; let old_scale = cam.zoom*tile_px;
-                            let world_cx=(midx - cam.offset_x)/old_scale; let world_cy=(midy - cam.offset_y)/old_scale;
-                            let mut ts2 = touch_state_tc.borrow_mut(); ts2.pinch=true; ts2.single_active=false; ts2.start_pinch_dist=dist; ts2.start_zoom=cam.zoom; ts2.world_center_x=world_cx; ts2.world_center_y=world_cy; }
+                        if e.touches().length() >= 2 {
+                            if let (Some(t1), Some(t0a)) =
+                                (e.touches().item(1), e.touches().item(0))
+                            {
+                                let x0 = t0a.client_x() as f64 - rect.left();
+                                let y0 = t0a.client_y() as f64 - rect.top();
+                                let x1 = t1.client_x() as f64 - rect.left();
+                                let y1 = t1.client_y() as f64 - rect.top();
+                                let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt().max(1.0);
+                                let midx = (x0 + x1) * 0.5;
+                                let midy = (y0 + y1) * 0.5;
+                                let cam = camera_tc.borrow_mut();
+                                let old_scale = cam.zoom * tile_px;
+                                let world_cx = (midx - cam.offset_x) / old_scale;
+                                let world_cy = (midy - cam.offset_y) / old_scale;
+                                let mut ts2 = touch_state_tc.borrow_mut();
+                                ts2.pinch = true;
+                                ts2.single_active = false;
+                                ts2.start_pinch_dist = dist;
+                                ts2.start_zoom = cam.zoom;
+                                ts2.world_center_x = world_cx;
+                                ts2.world_center_y = world_cy;
+                            }
                         }
-                        drop(cam);
+                        // cam borrow dropped by going out of scope
                     }
                     e.prevent_default();
-                }) as Box<dyn FnMut(_)> )
+                }) as Box<dyn FnMut(_)>)
             };
-            canvas.add_event_listener_with_callback("touchstart", touch_start_cb.as_ref().unchecked_ref()).ok();
+            canvas
+                .add_event_listener_with_callback(
+                    "touchstart",
+                    touch_start_cb.as_ref().unchecked_ref(),
+                )
+                .ok();
 
             let touch_move_cb = {
                 let canvas_tc = canvas.clone();
@@ -676,45 +835,107 @@ fn run_view(props: &RunViewProps) -> Html {
                 let touch_state_tc = touch_state.clone();
                 Closure::wrap(Box::new(move |e: TouchEvent| {
                     let touches = e.touches();
-                    if touches.length()==0 { e.prevent_default(); return; }
+                    if touches.length() == 0 {
+                        e.prevent_default();
+                        return;
+                    }
                     let rect = canvas_tc.get_bounding_client_rect();
-                    let tile_px=32.0;
-                    if touches.length()==1 { // drag / mining
-                        if let Some(t0)=touches.item(0) {
+                    let tile_px = 32.0;
+                    if touches.length() == 1 {
+                        // drag / mining
+                        if let Some(t0) = touches.item(0) {
                             let cx = t0.client_x() as f64 - rect.left();
                             let cy = t0.client_y() as f64 - rect.top();
                             let rs_snap = (*run_state_tc).clone();
-                            if rs_snap.is_paused { e.prevent_default(); return; }
+                            if rs_snap.is_paused {
+                                e.prevent_default();
+                                return;
+                            }
                             let mut cam = camera_tc.borrow_mut();
-                            let scale_px = cam.zoom * tile_px; let world_x=(cx-cam.offset_x)/scale_px; let world_y=(cy-cam.offset_y)/scale_px; drop(cam);
+                            let scale_px = cam.zoom * tile_px;
+                            let world_x = (cx - cam.offset_x) / scale_px;
+                            let world_y = (cy - cam.offset_y) / scale_px;
+                            drop(cam);
                             let mut m = mining_tc.borrow_mut();
-                            if m.active && m.mouse_down { // update mining tile if moved
-                                let gs=rs_snap.grid_size; let tx=world_x.floor() as i32; let ty=world_y.floor() as i32;
-                                if tx>=0 && ty>=0 && (tx as u32)<gs.width && (ty as u32)<gs.height {
-                                    let idx=(ty as u32 * gs.width + tx as u32) as usize;
-                                    match rs_snap.tiles[idx].kind { model::TileKind::Rock { .. } => { if tx!=m.tile_x || ty!=m.tile_y { let hardness=rs_snap.tiles[idx].hardness.max(1) as f64; let spd=rs_snap.mining_speed.max(0.0001); m.tile_x=tx; m.tile_y=ty; m.required_secs=hardness/spd; m.elapsed_secs=0.0; m.progress=0.0; } }, _ => { m.active=false; m.mouse_down=false; } }
-                                } else { m.active=false; m.mouse_down=false; }
-                            } else { // pan
+                            if m.active && m.mouse_down {
+                                // update mining tile if moved
+                                let gs = rs_snap.grid_size;
+                                let tx = world_x.floor() as i32;
+                                let ty = world_y.floor() as i32;
+                                if tx >= 0
+                                    && ty >= 0
+                                    && (tx as u32) < gs.width
+                                    && (ty as u32) < gs.height
+                                {
+                                    let idx = (ty as u32 * gs.width + tx as u32) as usize;
+                                    match rs_snap.tiles[idx].kind {
+                                        model::TileKind::Rock { .. } => {
+                                            if tx != m.tile_x || ty != m.tile_y {
+                                                let hardness =
+                                                    rs_snap.tiles[idx].hardness.max(1) as f64;
+                                                let spd = rs_snap.mining_speed.max(0.0001);
+                                                m.tile_x = tx;
+                                                m.tile_y = ty;
+                                                m.required_secs = hardness / spd;
+                                                m.elapsed_secs = 0.0;
+                                                m.progress = 0.0;
+                                            }
+                                        }
+                                        model::TileKind::Empty => { /* ignore while dragging mining over empty */
+                                        }
+                                        _ => {
+                                            m.active = false;
+                                            m.mouse_down = false;
+                                        }
+                                    }
+                                } else {
+                                    m.active = false;
+                                    m.mouse_down = false;
+                                }
+                            } else {
+                                // pan
                                 let mut cam2 = camera_tc.borrow_mut();
                                 let mut ts = touch_state_tc.borrow_mut();
-                                if ts.single_active { let dx = cx - ts.last_touch_x; let dy = cy - ts.last_touch_y; cam2.offset_x += dx; cam2.offset_y += dy; ts.last_touch_x=cx; ts.last_touch_y=cy; }
+                                if ts.single_active {
+                                    let dx = cx - ts.last_touch_x;
+                                    let dy = cy - ts.last_touch_y;
+                                    cam2.offset_x += dx;
+                                    cam2.offset_y += dy;
+                                    ts.last_touch_x = cx;
+                                    ts.last_touch_y = cy;
+                                }
                             }
                         }
-                    } else if touches.length()>=2 { // pinch zoom
+                    } else if touches.length() >= 2 {
+                        // pinch zoom
                         if let (Some(t0), Some(t1)) = (touches.item(0), touches.item(1)) {
-                            let x0 = t0.client_x() as f64 - rect.left(); let y0 = t0.client_y() as f64 - rect.top();
-                            let x1 = t1.client_x() as f64 - rect.left(); let y1 = t1.client_y() as f64 - rect.top();
-                            let dist = ((x1-x0).powi(2)+(y1-y0).powi(2)).sqrt().max(1.0);
-                            let midx=(x0+x1)*0.5; let midy=(y0+y1)*0.5;
+                            let x0 = t0.client_x() as f64 - rect.left();
+                            let y0 = t0.client_y() as f64 - rect.top();
+                            let x1 = t1.client_x() as f64 - rect.left();
+                            let y1 = t1.client_y() as f64 - rect.top();
+                            let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt().max(1.0);
+                            let midx = (x0 + x1) * 0.5;
+                            let midy = (y0 + y1) * 0.5;
                             let mut cam = camera_tc.borrow_mut();
                             let mut ts = touch_state_tc.borrow_mut();
-                            if ts.pinch { let sf = dist/ts.start_pinch_dist; cam.zoom=(ts.start_zoom*sf).clamp(0.2,5.0); let new_scale=cam.zoom*tile_px; cam.offset_x = midx - ts.world_center_x*new_scale; cam.offset_y = midy - ts.world_center_y*new_scale; }
+                            if ts.pinch {
+                                let sf = dist / ts.start_pinch_dist;
+                                cam.zoom = (ts.start_zoom * sf).clamp(0.2, 5.0);
+                                let new_scale = cam.zoom * tile_px;
+                                cam.offset_x = midx - ts.world_center_x * new_scale;
+                                cam.offset_y = midy - ts.world_center_y * new_scale;
+                            }
                         }
                     }
                     e.prevent_default();
-                }) as Box<dyn FnMut(_)> )
+                }) as Box<dyn FnMut(_)>)
             };
-            canvas.add_event_listener_with_callback("touchmove", touch_move_cb.as_ref().unchecked_ref()).ok();
+            canvas
+                .add_event_listener_with_callback(
+                    "touchmove",
+                    touch_move_cb.as_ref().unchecked_ref(),
+                )
+                .ok();
 
             let touch_end_cb = {
                 let camera_tc = camera.clone();
@@ -722,35 +943,103 @@ fn run_view(props: &RunViewProps) -> Html {
                 let touch_state_tc = touch_state.clone();
                 Closure::wrap(Box::new(move |e: TouchEvent| {
                     let left = e.touches().length();
-                    if left==0 { // reset
-                        let mut ts = touch_state_tc.borrow_mut(); ts.single_active=false; ts.pinch=false; drop(ts);
-                        let mut cam = camera_tc.borrow_mut(); cam.panning=false; drop(cam);
-                        let mut m = mining_tc.borrow_mut(); m.active=false; m.mouse_down=false; m.progress=0.0; m.elapsed_secs=0.0; drop(m);
-                    } else if left==1 { let mut ts = touch_state_tc.borrow_mut(); ts.pinch=false; ts.single_active=true; }
+                    if left == 0 {
+                        // reset all touch / mining state
+                        {
+                            let mut ts = touch_state_tc.borrow_mut();
+                            ts.single_active = false;
+                            ts.pinch = false;
+                        }
+                        {
+                            let mut cam = camera_tc.borrow_mut();
+                            cam.panning = false;
+                        }
+                        {
+                            let mut m = mining_tc.borrow_mut();
+                            m.active = false;
+                            m.mouse_down = false;
+                            m.progress = 0.0;
+                            m.elapsed_secs = 0.0;
+                        }
+                    } else if left == 1 {
+                        // back to single-finger mode
+                        let mut ts = touch_state_tc.borrow_mut();
+                        ts.pinch = false;
+                        ts.single_active = true;
+                    }
                     e.prevent_default();
-                }) as Box<dyn FnMut(_)> )
+                }) as Box<dyn FnMut(_)>)
             };
-            canvas.add_event_listener_with_callback("touchend", touch_end_cb.as_ref().unchecked_ref()).ok();
-            canvas.add_event_listener_with_callback("touchcancel", touch_end_cb.as_ref().unchecked_ref()).ok();
+            canvas
+                .add_event_listener_with_callback("touchend", touch_end_cb.as_ref().unchecked_ref())
+                .ok();
+            canvas
+                .add_event_listener_with_callback(
+                    "touchcancel",
+                    touch_end_cb.as_ref().unchecked_ref(),
+                )
+                .ok();
 
             // Provide cleanup for all listeners & intervals
             let window_clone = window.clone();
             move || {
-                let _ = canvas.remove_event_listener_with_callback("wheel", wheel_cb.as_ref().unchecked_ref());
-                let _ = canvas.remove_event_listener_with_callback("mousedown", mousedown_cb.as_ref().unchecked_ref());
-                let _ = canvas.remove_event_listener_with_callback("mousemove", mousemove_cb.as_ref().unchecked_ref());
-                let _ = canvas.remove_event_listener_with_callback("contextmenu", contextmenu_cb.as_ref().unchecked_ref());
-                let _ = window_clone.remove_event_listener_with_callback("mouseup", mouseup_cb.as_ref().unchecked_ref());
-                let _ = window_clone.remove_event_listener_with_callback("resize", resize_cb.as_ref().unchecked_ref());
-                let _ = canvas.remove_event_listener_with_callback("touchstart", touch_start_cb.as_ref().unchecked_ref());
-                let _ = canvas.remove_event_listener_with_callback("touchmove", touch_move_cb.as_ref().unchecked_ref());
-                let _ = canvas.remove_event_listener_with_callback("touchend", touch_end_cb.as_ref().unchecked_ref());
-                let _ = canvas.remove_event_listener_with_callback("touchcancel", touch_end_cb.as_ref().unchecked_ref());
+                let _ = canvas.remove_event_listener_with_callback(
+                    "wheel",
+                    wheel_cb.as_ref().unchecked_ref(),
+                );
+                let _ = canvas.remove_event_listener_with_callback(
+                    "mousedown",
+                    mousedown_cb.as_ref().unchecked_ref(),
+                );
+                let _ = canvas.remove_event_listener_with_callback(
+                    "mousemove",
+                    mousemove_cb.as_ref().unchecked_ref(),
+                );
+                let _ = canvas.remove_event_listener_with_callback(
+                    "contextmenu",
+                    contextmenu_cb.as_ref().unchecked_ref(),
+                );
+                let _ = window_clone.remove_event_listener_with_callback(
+                    "mouseup",
+                    mouseup_cb.as_ref().unchecked_ref(),
+                );
+                let _ = window_clone.remove_event_listener_with_callback(
+                    "resize",
+                    resize_cb.as_ref().unchecked_ref(),
+                );
+                let _ = canvas.remove_event_listener_with_callback(
+                    "touchstart",
+                    touch_start_cb.as_ref().unchecked_ref(),
+                );
+                let _ = canvas.remove_event_listener_with_callback(
+                    "touchmove",
+                    touch_move_cb.as_ref().unchecked_ref(),
+                );
+                let _ = canvas.remove_event_listener_with_callback(
+                    "touchend",
+                    touch_end_cb.as_ref().unchecked_ref(),
+                );
+                let _ = canvas.remove_event_listener_with_callback(
+                    "touchcancel",
+                    touch_end_cb.as_ref().unchecked_ref(),
+                );
                 window_clone.clear_interval_with_handle(mining_tick_id);
                 window_clone.clear_interval_with_handle(sim_tick_id);
-                if let Some(id) = *raf_id.borrow() { let _ = window_clone.cancel_animation_frame(id); }
+                if let Some(id) = *raf_id.borrow() {
+                    let _ = window_clone.cancel_animation_frame(id);
+                }
                 // Keep closures (mining_tick, sim_tick, etc.) in scope until here so they aren't dropped early.
-                let _keep_alive = (&mining_tick, &sim_tick, &wheel_cb, &mousedown_cb, &mousemove_cb, &mouseup_cb, &touch_start_cb, &touch_move_cb, &touch_end_cb);
+                let _keep_alive = (
+                    &mining_tick,
+                    &sim_tick,
+                    &wheel_cb,
+                    &mousedown_cb,
+                    &mousemove_cb,
+                    &mouseup_cb,
+                    &touch_start_cb,
+                    &touch_move_cb,
+                    &touch_end_cb,
+                );
             }
         });
     }
@@ -792,7 +1081,11 @@ fn run_view(props: &RunViewProps) -> Html {
     let paused_ov = rs_overlay.is_paused;
     let game_over = rs_overlay.game_over; // new
     let enemy_count = rs_overlay.enemies.len(); // debug
-    let path_len = if !rs_overlay.path_loop.is_empty() { rs_overlay.path_loop.len() } else { rs_overlay.path.len() }; // debug loop length
+    let path_len = if !rs_overlay.path_loop.is_empty() {
+        rs_overlay.path_loop.len()
+    } else {
+        rs_overlay.path.len()
+    }; // debug loop length
     let pause_label_rv = if paused_ov {
         if game_over {
             "Game Over"
@@ -917,8 +1210,37 @@ fn run_view(props: &RunViewProps) -> Html {
         })
     };
 
-    let path_debug_text = if *show_path { let rsd = (*props.run_state).clone(); let source = if !rsd.path_loop.is_empty() { &rsd.path_loop } else { &rsd.path }; if source.is_empty() { "(empty)".to_string() } else { let mut s=String::new(); for (i,p) in source.iter().enumerate(){ if i>0 { s.push_str(" -> "); } s.push_str(&format!("({},{})", p.x,p.y)); if i>14 { s.push_str(" ..."); break; } } s } } else { String::new() };
-    let path_nodes_style = if *show_path { "font-size:11px; opacity:0.7;" } else { "font-size:11px; opacity:0.7; display:none;" };
+    let path_debug_text = if *show_path {
+        let rsd = (*props.run_state).clone();
+        let source = if !rsd.path_loop.is_empty() {
+            &rsd.path_loop
+        } else {
+            &rsd.path
+        };
+        if source.is_empty() {
+            "(empty)".to_string()
+        } else {
+            let mut s = String::new();
+            for (i, p) in source.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(" -> ");
+                }
+                s.push_str(&format!("({},{})", p.x, p.y));
+                if i > 14 {
+                    s.push_str(" ...");
+                    break;
+                }
+            }
+            s
+        }
+    } else {
+        String::new()
+    };
+    let path_nodes_style = if *show_path {
+        "font-size:11px; opacity:0.7;"
+    } else {
+        "font-size:11px; opacity:0.7; display:none;"
+    };
 
     html! {
         <div style="position:relative; width:100vw; height:100vh;">
