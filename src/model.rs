@@ -129,12 +129,12 @@ pub struct RunState {
     pub game_over: bool,
     pub last_mined_idx: Option<usize>,
     pub sim_time: f64,
-    // NEW tower-related state
     pub towers: Vec<Tower>,
     pub tower_base_range: f64,
     pub tower_base_damage: u32,
     pub tower_cost: u64,
-    pub projectiles: Vec<Projectile>, // NEW: active projectiles
+    pub projectiles: Vec<Projectile>,
+    pub run_id: u64, // NEW: increments each reset to allow camera re-center
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,9 +335,9 @@ impl RunState {
         let mut rs = Self {
             grid_size,
             tiles,
-            currencies: Currencies { gold: 50, ..Default::default() }, // start with some gold for testing
+            currencies: Currencies { gold: 5, ..Default::default() }, // start with some gold for testing
             stats: RunStats::default(),
-            life: 200,
+            life: 20,
             mining_speed: 6.0,
             started: false,
             is_paused: false,
@@ -354,8 +354,9 @@ impl RunState {
             towers: Vec::new(),
             tower_base_range: 3.5,
             tower_base_damage: 2,
-            tower_cost: 2, // low debug cost
+            tower_cost: 2,
             projectiles: Vec::new(),
+            run_id: 0,
         };
         rs.path = compute_path(&rs);
         rs.path_loop = build_loop_path(&rs);
@@ -641,7 +642,12 @@ impl Reducible for RunState {
         use RunAction::*;
         // Reset is special: return brand new state
         if let ResetRun = action {
-            return Rc::new(RunState::new_basic(self.grid_size));
+            let prev_research = self.currencies.research;
+            let prev_run_id = self.run_id;
+            let mut fresh = RunState::new_basic(self.grid_size);
+            fresh.currencies.research = prev_research; // persist research across runs
+            fresh.run_id = prev_run_id + 1; // increment run id
+            return Rc::new(fresh);
         }
         let mut new = (*self).clone();
         match action {
@@ -772,7 +778,7 @@ impl Reducible for RunState {
                 }
                 // UPDATE PROJECTILES & APPLY DAMAGE ON IMPACT
                 if !new.projectiles.is_empty() {
-                    let mut gained_gold = 0u64;
+                    let mut kills = 0u64; // count kills for research
                     let mut i = 0;
                     while i < new.projectiles.len() {
                         let mut remove = false;
@@ -801,10 +807,9 @@ impl Reducible for RunState {
                     }
                     // cull dead enemies after projectile impacts
                     if !new.enemies.is_empty() {
-                        new.enemies.retain(|e| { if e.hp == 0 { gained_gold = gained_gold.saturating_add(1); false } else { true } });
-                        if gained_gold > 0 {
-                            new.currencies.gold = new.currencies.gold.saturating_add(gained_gold);
-                            new.currencies.research = new.currencies.research.saturating_add(gained_gold); // 1 research per kill
+                        new.enemies.retain(|e| { if e.hp == 0 { kills = kills.saturating_add(1); false } else { true } });
+                        if kills > 0 {
+                            new.currencies.research = new.currencies.research.saturating_add(kills); // research only per kill
                         }
                     }
                 }

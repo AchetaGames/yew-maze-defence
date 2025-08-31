@@ -2,7 +2,7 @@
 use std::cell::RefCell; // added for RAF id storage
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
-use wasm_bindgen::closure::Closure;
+use wasm_bindgen::closure::Closure; // restored for callbacks
 use web_sys::{
     CanvasRenderingContext2d, HtmlCanvasElement, HtmlElement, KeyboardEvent, TouchEvent,
 };
@@ -191,6 +191,8 @@ fn run_view(props: &RunViewProps) -> Html {
                     let rs_handle = run_state_ref.borrow();
                     let rs = (**rs_handle).clone();
                     let show_path_on = *show_path_flag.borrow();
+                    // Precompute interactable mask
+                    let interact_mask = compute_interactable_mask(&rs);
                     // Clear & set transform (always same background)
                     ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0).ok();
                     ctx.set_fill_style_str("#0e1116");
@@ -325,6 +327,11 @@ fn run_view(props: &RunViewProps) -> Html {
                                 }
                                 _ => {}
                             }
+                            // Fog-of-war overlay for non-interactable tiles
+                            if !interact_mask[idx] {
+                                ctx.set_fill_style_str("rgba(0,0,0,0.35)");
+                                ctx.fill_rect(x as f64, y as f64, 1.0, 1.0);
+                            }
                         }
                     }
                     // enemies simple circles
@@ -432,8 +439,11 @@ fn run_view(props: &RunViewProps) -> Html {
                         let gs = rs.grid_size;
                         if (hx as u32) < gs.width && (hy as u32) < gs.height {
                             let idx = (hy as u32 * gs.width + hx as u32) as usize;
+                            let interact_ok = interact_mask[idx];
                             // Build tuple (color_opt, msg, show_range)
-                            let (color_opt, msg, show_range) = if rs.is_paused || rs.game_over {
+                            let (color_opt, msg, show_range) = if !interact_ok {
+                                (Some("rgba(90,90,90,0.35)"), "Out of reach".to_string(), false)
+                            } else if rs.is_paused || rs.game_over {
                                 (Some("rgba(110,118,129,0.35)"), "Paused".to_string(), false)
                             } else if !matches!(rs.tiles[idx].kind, model::TileKind::Rock { .. }) {
                                 (Some("rgba(248,81,73,0.45)"), "Need Rock".to_string(), false)
@@ -619,70 +629,38 @@ fn run_view(props: &RunViewProps) -> Html {
                     if e.key() == "t" || e.key() == "T" {
                         e.prevent_default();
                         let (hx, hy) = *hover_ref.borrow();
-                        if hx < 0 || hy < 0 {
-                            return;
-                        }
+                        if hx < 0 || hy < 0 { return; }
                         let handle = run_state_ref_ct.borrow().clone();
                         let rs = (*handle).clone();
                         let gs = rs.grid_size;
-                        if (hx as u32) >= gs.width || (hy as u32) >= gs.height {
-                            return;
-                        }
-                        if rs.is_paused || rs.game_over {
-                            tower_feedback_hotkey.set("Paused".into());
-                            return;
-                        }
+                        if (hx as u32) >= gs.width || (hy as u32) >= gs.height { return; }
+                        let interact_mask = compute_interactable_mask(&rs);
                         let idx = (hy as u32 * gs.width + hx as u32) as usize;
+                        if !interact_mask[idx] { tower_feedback_hotkey.set("Out of reach".into()); return; }
+                        if rs.is_paused || rs.game_over { tower_feedback_hotkey.set("Paused".into()); return; }
+                        let idx2 = idx; // reuse
                         use web_sys::console;
-                        if let model::TileKind::Rock { .. } = rs.tiles[idx].kind {
-                            let has_t = rs
-                                .towers
-                                .iter()
-                                .any(|t| t.x == hx as u32 && t.y == hy as u32);
+                        if let model::TileKind::Rock { .. } = rs.tiles[idx2].kind {
+                            let has_t = rs.towers.iter().any(|t| t.x == hx as u32 && t.y == hy as u32);
                             if has_t {
-                                console::log_1(
-                                    &format!("Hotkey: removing tower at ({},{})", hx, hy).into(),
-                                );
-                                handle.dispatch(RunAction::RemoveTower {
-                                    x: hx as u32,
-                                    y: hy as u32,
-                                });
+                                console::log_1(&format!("Hotkey: removing tower at ({},{})", hx, hy).into());
+                                handle.dispatch(RunAction::RemoveTower { x: hx as u32, y: hy as u32 });
                                 tower_feedback_hotkey.set("Tower removed".into());
                             } else if rs.currencies.gold < rs.tower_cost {
-                                console::log_1(
-                                    &format!(
-                                        "Hotkey: insufficient gold (have {}, need {})",
-                                        rs.currencies.gold, rs.tower_cost
-                                    )
-                                    .into(),
-                                );
+                                console::log_1(&format!("Hotkey: insufficient gold (have {}, need {})", rs.currencies.gold, rs.tower_cost).into());
                                 tower_feedback_hotkey.set(format!("Need {} gold", rs.tower_cost));
                             } else {
-                                console::log_1(
-                                    &format!(
-                                        "Hotkey: placing tower at ({},{}) cost {}",
-                                        hx, hy, rs.tower_cost
-                                    )
-                                    .into(),
-                                );
-                                handle.dispatch(RunAction::PlaceTower {
-                                    x: hx as u32,
-                                    y: hy as u32,
-                                });
+                                console::log_1(&format!("Hotkey: placing tower at ({},{}) cost {}", hx, hy, rs.tower_cost).into());
+                                handle.dispatch(RunAction::PlaceTower { x: hx as u32, y: hy as u32 });
                                 tower_feedback_hotkey.set("Tower placed".into());
                             }
                         } else {
-                            console::log_1(
-                                &format!("Hotkey: invalid tile kind for tower at ({},{})", hx, hy)
-                                    .into(),
-                            );
+                            console::log_1(&format!("Hotkey: invalid tile kind for tower at ({},{})", hx, hy).into());
                             tower_feedback_hotkey.set("Need Rock".into());
                         }
-                        if let Some(f) = &*draw_ref_k.borrow() {
-                            f();
-                        }
+                        if let Some(f) = &*draw_ref_k.borrow() { f(); }
                     }
-                }) as Box<dyn FnMut(_)>)
+                }) as Box<dyn FnMut(_)> )
             };
             window
                 .add_event_listener_with_callback("keydown", keydown_cb.as_ref().unchecked_ref())
@@ -698,69 +676,47 @@ fn run_view(props: &RunViewProps) -> Html {
                     let button = e.button();
                     if button == 0 {
                         let cam = camera.borrow_mut();
-                        let tile_px = 32.0;
-                        let scale_px = cam.zoom * tile_px;
+                        let tile_px = 32.0; let scale_px = cam.zoom * tile_px;
                         let world_x = ((e.offset_x() as f64) - cam.offset_x) / scale_px;
                         let world_y = ((e.offset_y() as f64) - cam.offset_y) / scale_px;
                         drop(cam);
                         let handle = run_state_ref_ct.borrow().clone();
                         let rs = (*handle).clone();
-                        if rs.is_paused {
-                            return;
-                        }
+                        if rs.is_paused { return; }
                         let gs = rs.grid_size;
-                        let tx = world_x.floor() as i32;
-                        let ty = world_y.floor() as i32;
+                        let tx = world_x.floor() as i32; let ty = world_y.floor() as i32;
                         if tx >= 0 && ty >= 0 && (tx as u32) < gs.width && (ty as u32) < gs.height {
                             let idx = (ty as u32 * gs.width + tx as u32) as usize;
+                            let interact_mask = compute_interactable_mask(&rs);
+                            if !interact_mask[idx] { return; }
                             match rs.tiles[idx].kind {
                                 model::TileKind::Rock { .. } | model::TileKind::Wall => {
-                                    let has_tower_here = rs
-                                        .towers
-                                        .iter()
-                                        .any(|t| t.x == tx as u32 && t.y == ty as u32);
+                                    let has_tower_here = rs.towers.iter().any(|t| t.x == tx as u32 && t.y == ty as u32);
                                     if !has_tower_here {
-                                        if !rs.started {
-                                            handle.dispatch(RunAction::StartRun);
-                                        }
+                                        if !rs.started { handle.dispatch(RunAction::StartRun); }
                                         let mut m = mining.borrow_mut();
-                                        m.tile_x = tx;
-                                        m.tile_y = ty;
+                                        m.tile_x = tx; m.tile_y = ty;
                                         let hardness = rs.tiles[idx].hardness.max(1) as f64;
                                         let spd = rs.mining_speed.max(0.0001);
                                         m.required_secs = hardness / spd;
-                                        m.elapsed_secs = 0.0;
-                                        m.progress = 0.0;
-                                        m.active = true;
-                                        m.mouse_down = true;
+                                        m.elapsed_secs = 0.0; m.progress = 0.0; m.active = true; m.mouse_down = true;
                                     }
                                 }
                                 model::TileKind::Empty => {
-                                    {
-                                        let mut m = mining.borrow_mut();
-                                        m.active = false;
-                                        m.mouse_down = false;
-                                        m.progress = 0.0;
-                                        m.elapsed_secs = 0.0;
-                                    }
-                                    handle.dispatch(RunAction::PlaceWall {
-                                        x: tx as u32,
-                                        y: ty as u32,
-                                    });
+                                    // allow placing wall only if interactable (already true)
+                                    let mut m = mining.borrow_mut();
+                                    m.active = false; m.mouse_down = false; m.progress = 0.0; m.elapsed_secs = 0.0;
+                                    handle.dispatch(RunAction::PlaceWall { x: tx as u32, y: ty as u32 });
                                 }
                                 _ => {}
                             }
                         }
                     } else {
                         let mut cam = camera.borrow_mut();
-                        cam.panning = true;
-                        cam.last_x = e.client_x() as f64;
-                        cam.last_y = e.client_y() as f64;
+                        cam.panning = true; cam.last_x = e.client_x() as f64; cam.last_y = e.client_y() as f64;
                     }
-                    if let Some(f) = &*draw_ref.borrow() {
-                        f();
-                    }
-                }) as Box<dyn FnMut(_)>)
+                    if let Some(f) = &*draw_ref.borrow() { f(); }
+                }) as Box<dyn FnMut(_)> )
             };
             canvas
                 .add_event_listener_with_callback(
@@ -1165,6 +1121,57 @@ fn run_view(props: &RunViewProps) -> Html {
             }
         });
     }
+    // Recenter automatically when run_id changes (after a reset)
+    {
+        let camera_ref = camera.clone();
+        let run_state_handle = props.run_state.clone();
+        let canvas_ref_local = canvas_ref.clone();
+        let run_id_dependency = props.run_state.run_id;
+        use_effect_with(run_id_dependency, move |_| {
+            let rs = (*run_state_handle).clone();
+            // find new Start
+            let mut sx = (rs.grid_size.width / 2) as u32;
+            let mut sy = (rs.grid_size.height / 2) as u32;
+            for (i, t) in rs.tiles.iter().enumerate() {
+                if let model::TileKind::Start = t.kind { sx = (i as u32)%rs.grid_size.width; sy = (i as u32)/rs.grid_size.width; break; }
+            }
+            if let Some(canvas) = canvas_ref_local.cast::<HtmlCanvasElement>() {
+                let w = canvas.width() as f64; let h = canvas.height() as f64;
+                let mut cam = camera_ref.borrow_mut();
+                let tile_px = 32.0; let scale_px = cam.zoom * tile_px;
+                cam.offset_x = w * 0.5 - scale_px * (sx as f64 + 0.5);
+                cam.offset_y = h * 0.5 - scale_px * (sy as f64 + 0.5);
+                cam.initialized = true;
+            } else {
+                // log_dbg(&format!("[run-id-center] canvas not ready run_id={}", rs.run_id));
+            }
+            || ()
+        });
+    }
+    // Recenter & reset zoom when game over triggers
+    {
+        let camera_ref = camera.clone();
+        let run_state_handle = props.run_state.clone();
+        let canvas_ref_local = canvas_ref.clone();
+        let game_over_dep = props.run_state.game_over;
+        use_effect_with(game_over_dep, move |go| {
+            if *go {
+                let rs = (*run_state_handle).clone();
+                let mut sx = (rs.grid_size.width / 2) as u32; let mut sy = (rs.grid_size.height / 2) as u32;
+                for (i, t) in rs.tiles.iter().enumerate() { if let model::TileKind::Start = t.kind { sx = (i as u32)%rs.grid_size.width; sy=(i as u32)/rs.grid_size.width; break; } }
+                if let Some(canvas) = canvas_ref_local.cast::<HtmlCanvasElement>() {
+                    let w = canvas.width() as f64; let h = canvas.height() as f64;
+                    let mut cam = camera_ref.borrow_mut();
+                    cam.zoom = 2.5; let tile_px=32.0; let scale_px = cam.zoom * tile_px;
+                    cam.offset_x = w*0.5 - scale_px*(sx as f64 + 0.5);
+                    cam.offset_y = h*0.5 - scale_px*(sy as f64 + 0.5);
+                    cam.initialized = true;
+                }
+            }
+            || ()
+        });
+    }
+
     // Overlay controls & legend
     let rs_snapshot = (*props.run_state).clone();
     let mut has_basic = false;
@@ -1374,6 +1381,7 @@ fn run_view(props: &RunViewProps) -> Html {
                 <div>{ format!("Gold: {}", gold_ov) }</div>
                 <div>{ format!("Life: {}", life_ov) }</div>
                 <div>{ format!("Research: {}", research_ov) }</div>
+                <div style="font-size:11px; opacity:0.7;">{ format!("Run: {}", rs_overlay.run_id) }</div>
                 <div style="font-size:11px; opacity:0.7;">{ format!("Enemies: {}", enemy_count) }</div>
                 <div style="font-size:11px; opacity:0.7;">{ format!("Path: {}", path_len) }</div>
                 <div style={path_nodes_style.to_string()}>{ format!("PathNodes: {}", path_debug_text) }</div>
@@ -1603,4 +1611,55 @@ fn app() -> Html {
 
 fn main() {
     yew::Renderer::<App>::new().render();
+}
+
+// New: compute interactable (frontier) mask: path tiles + their 4-neighbors
+fn compute_interactable_mask(rs: &RunState) -> Vec<bool> {
+    use std::collections::VecDeque;
+    let gs = rs.grid_size;
+    let tile_count = rs.tiles.len();
+    let mut mask = vec![false; tile_count]; // final interactable tiles (empties + frontier rocks/walls/start/direction)
+    let mut reachable = vec![false; tile_count]; // reachable empty/start/direction tiles via flood fill
+
+    // Helper: index from (x,y)
+    let idx_of = |x: u32, y: u32| -> usize { (y * gs.width + x) as usize };
+    let in_bounds = |x: i32, y: i32| x >= 0 && y >= 0 && (x as u32) < gs.width && (y as u32) < gs.height;
+
+    // Seed queue with path tiles (rs.path_loop if available else rs.path) that are Empty or Start/Direction.
+    let mut q: VecDeque<(u32,u32)> = VecDeque::new();
+    let mut enqueue = |x: u32, y: u32, reachable: &mut Vec<bool>, q: &mut VecDeque<(u32,u32)>| {
+        let i = idx_of(x,y);
+        if !reachable[i] { reachable[i] = true; q.push_back((x,y)); }
+    };
+    let seeds: Vec<model::Position> = if !rs.path_loop.is_empty() { rs.path_loop.clone() } else { rs.path.clone() };
+    for p in &seeds {
+        if p.x < gs.width && p.y < gs.height {
+            let i = idx_of(p.x, p.y);
+            match rs.tiles[i].kind {
+                model::TileKind::Empty | model::TileKind::Start | model::TileKind::Direction { .. } => enqueue(p.x, p.y, &mut reachable, &mut q),
+                _ => {}
+            }
+        }
+    }
+    // Fallback: if seeds empty, try Start tile
+    if q.is_empty() {
+        for (i,t) in rs.tiles.iter().enumerate() { if matches!(t.kind, model::TileKind::Start) { let x = (i as u32)%gs.width; let y = (i as u32)/gs.width; enqueue(x,y,&mut reachable,&mut q); break; } }
+    }
+
+    // Flood-fill through Empty tiles only (and keep Start/Direction reachable but do not traverse through walls/rocks)
+    let dirs = [(1i32,0i32),(-1,0),(0,1),(0,-1)];
+    while let Some((x,y)) = q.pop_front() {
+        let i = idx_of(x,y);
+        // Mark as interactable (reachable floor / start / direction tiles)
+        mask[i] = true;
+        for (dx,dy) in dirs { let nx = x as i32 + dx; let ny = y as i32 + dy; if !in_bounds(nx,ny) { continue; } let ux = nx as u32; let uy = ny as u32; let ni = idx_of(ux,uy); match rs.tiles[ni].kind { model::TileKind::Empty => { if !reachable[ni] { reachable[ni] = true; q.push_back((ux,uy)); } }, model::TileKind::Start | model::TileKind::Direction { .. } => { if !reachable[ni] { reachable[ni] = true; q.push_back((ux,uy)); } }, _ => {} } }
+    }
+
+    // Frontier: any Rock or Wall adjacent to a reachable tile becomes interactable
+    for y in 0..gs.height { for x in 0..gs.width { let i = idx_of(x,y); match rs.tiles[i].kind { model::TileKind::Rock { .. } | model::TileKind::Wall => { // check neighbors
+                let mut adj_reachable = false; for (dx,dy) in dirs { let nx = x as i32 + dx; let ny = y as i32 + dy; if in_bounds(nx,ny) { let ni = idx_of(nx as u32, ny as u32); if reachable[ni] { adj_reachable = true; break; } } }
+                if adj_reachable { mask[i] = true; }
+            }, _ => {} } } }
+
+    mask
 }
