@@ -112,7 +112,6 @@ pub struct Enemy {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunState {
     pub grid_size: GridSize,
-    /// Row-major tiles; length = width * height.
     pub tiles: Vec<Tile>,
     pub currencies: Currencies,
     pub stats: RunStats,
@@ -130,6 +129,61 @@ pub struct RunState {
     pub game_over: bool,
     pub last_mined_idx: Option<usize>,
     pub sim_time: f64,
+    // NEW tower-related state
+    pub towers: Vec<Tower>,
+    pub tower_base_range: f64,
+    pub tower_base_damage: u32,
+    pub tower_cost: u64,
+    pub projectiles: Vec<Projectile>, // NEW: active projectiles
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TowerKind {
+    Basic,
+    // Future variants influenced by boost tiles (e.g., Slow, Damage, Range, FireRate)
+    Slow,
+    Damage,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Tower {
+    pub x: u32,
+    pub y: u32,
+    pub kind: TowerKind,
+    pub range: f64,
+    pub damage: u32,
+    pub fire_rate: f64,          // shots per second
+    pub cooldown_remaining: f64, // seconds until next shot
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Projectile {
+    pub x: f64,
+    pub y: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub remaining: f64, // seconds until impact
+    pub damage: u32,
+}
+
+impl Tower {
+    pub fn new(x: u32, y: u32, kind: TowerKind, base_range: f64, base_damage: u32) -> Self {
+        // Basic defaults; could vary by kind
+        let (range_mul, dmg_mul, fire_rate) = match kind {
+            TowerKind::Basic => (1.0, 1.0, 1.0),
+            TowerKind::Slow => (1.1, 0.5, 0.75),
+            TowerKind::Damage => (0.9, 1.5, 0.8),
+        };
+        Self {
+            x,
+            y,
+            kind,
+            range: base_range * range_mul,
+            damage: (base_damage as f64 * dmg_mul).round() as u32,
+            fire_rate,
+            cooldown_remaining: 0.0,
+        }
+    }
 }
 
 impl RunState {
@@ -281,10 +335,9 @@ impl RunState {
         let mut rs = Self {
             grid_size,
             tiles,
-            currencies: Currencies::default(),
+            currencies: Currencies { gold: 50, ..Default::default() }, // start with some gold for testing
             stats: RunStats::default(),
             life: 200,
-            // Increase mining speed for faster testing (was 1.0)
             mining_speed: 6.0,
             started: false,
             is_paused: false,
@@ -298,6 +351,11 @@ impl RunState {
             game_over: false,
             last_mined_idx: None,
             sim_time: 0.0,
+            towers: Vec::new(),
+            tower_base_range: 3.5,
+            tower_base_damage: 2,
+            tower_cost: 2, // low debug cost
+            projectiles: Vec::new(),
         };
         rs.path = compute_path(&rs);
         rs.path_loop = build_loop_path(&rs);
@@ -566,11 +624,14 @@ fn update_loop_geometry(rs: &mut RunState) {
 pub enum RunAction {
     TogglePause,
     StartRun,
-    TickSecond, // called once per elapsed real second
+    TickSecond,
     MiningComplete { idx: usize },
-    SimTick { dt: f64 },          // ~16ms; advances enemies & spawns
-    ResetRun,                     // new
-    PlaceWall { x: u32, y: u32 }, // new wall placement
+    SimTick { dt: f64 },
+    ResetRun,
+    PlaceWall { x: u32, y: u32 },
+    // NEW tower actions
+    PlaceTower { x: u32, y: u32 },
+    RemoveTower { x: u32, y: u32 },
 }
 
 impl Reducible for RunState {
@@ -603,42 +664,82 @@ impl Reducible for RunState {
             MiningComplete { idx } => {
                 if new.game_over {
                 } else if idx < new.tiles.len() {
-                    if let TileKind::Rock { has_gold, .. } = new.tiles[idx].kind.clone() {
-                        new.tiles[idx].kind = TileKind::Empty;
-                        if new.stats.blocks_mined < u32::MAX {
-                            new.stats.blocks_mined += 1;
-                        }
-                        new.currencies.tile_credits = new.currencies.tile_credits.saturating_add(1);
-                        if has_gold {
-                            new.currencies.gold = new.currencies.gold.saturating_add(1);
-                        }
-                        new.path = compute_path(&new);
-                        new.path_loop = build_loop_path(&new);
-                        update_loop_geometry(&mut new);
-                        // snapshot geometry for projection to avoid borrow conflict
-                        let nodes = new.path_loop.clone();
-                        let cum = new.loop_cum_lengths.clone();
-                        let total = new.loop_total_length;
-                        for e in &mut new.enemies {
-                            let (d, dx, dy, next_i) =
-                                project_distance_on_loop_snapshot(&nodes, &cum, total, e.x, e.y);
-                            e.loop_dist = d;
-                            e.dir_dx = dx;
-                            e.dir_dy = dy;
-                            e.path_index = next_i;
-                        }
-                        if !new.path.is_empty() {
-                            let last_index = new.path.len().saturating_sub(1);
+                    new.last_mined_idx = Some(idx);
+                    dlog(&format!("MiningComplete reducer idx={} kind_before={:?}", idx, new.tiles[idx].kind));
+                                        match new.tiles[idx].kind.clone() {
+                        TileKind::Rock { has_gold, .. } => {
+                            new.tiles[idx].kind = TileKind::Empty;
+                            new.tiles[idx].hardness = 1; // mined tiles become soft empty
+                            if new.stats.blocks_mined < u32::MAX {
+                                new.stats.blocks_mined += 1;
+                            }
+                            new.currencies.tile_credits = new.currencies.tile_credits.saturating_add(1);
+                            if has_gold {
+                                new.currencies.gold = new.currencies.gold.saturating_add(1);
+                            }
+                            // proceed with updates
+                            new.path = compute_path(&new);
+                            new.path_loop = build_loop_path(&new);
+                            update_loop_geometry(&mut new);
+                            let nodes = new.path_loop.clone();
+                            let cum = new.loop_cum_lengths.clone();
+                            let total = new.loop_total_length;
                             for e in &mut new.enemies {
-                                if e.path_index > last_index {
-                                    e.path_index = last_index;
+                                let (d, dx, dy, next_i) = project_distance_on_loop_snapshot(&nodes, &cum, total, e.x, e.y);
+                                e.loop_dist = d;
+                                e.dir_dx = dx;
+                                e.dir_dy = dy;
+                                e.path_index = next_i;
+                            }
+                            if !new.path.is_empty() {
+                                let last_index = new.path.len().saturating_sub(1);
+                                for e in &mut new.enemies {
+                                    if e.path_index > last_index {
+                                        e.path_index = last_index;
+                                    }
+                                }
+                            } else {
+                                for e in &mut new.enemies {
+                                    e.path_index = 0;
                                 }
                             }
-                        } else {
+                        }
+                        TileKind::Wall => {
+                            // allow removing walls by mining too
+                            new.tiles[idx].kind = TileKind::Empty;
+                            new.tiles[idx].hardness = 1; // mined tiles become soft empty
+                            if new.stats.blocks_mined < u32::MAX {
+                                new.stats.blocks_mined += 1;
+                            }
+                            new.currencies.tile_credits = new.currencies.tile_credits.saturating_add(1);
+                            // no gold from walls
+                            new.path = compute_path(&new);
+                            new.path_loop = build_loop_path(&new);
+                            update_loop_geometry(&mut new);
+                            let nodes = new.path_loop.clone();
+                            let cum = new.loop_cum_lengths.clone();
+                            let total = new.loop_total_length;
                             for e in &mut new.enemies {
-                                e.path_index = 0;
+                                let (d, dx, dy, next_i) = project_distance_on_loop_snapshot(&nodes, &cum, total, e.x, e.y);
+                                e.loop_dist = d;
+                                e.dir_dx = dx;
+                                e.dir_dy = dy;
+                                e.path_index = next_i;
+                            }
+                            if !new.path.is_empty() {
+                                let last_index = new.path.len().saturating_sub(1);
+                                for e in &mut new.enemies {
+                                    if e.path_index > last_index {
+                                        e.path_index = last_index;
+                                    }
+                                }
+                            } else {
+                                for e in &mut new.enemies {
+                                    e.path_index = 0;
+                                }
                             }
                         }
+                        _ => {}
                     }
                 }
             }
@@ -647,6 +748,67 @@ impl Reducible for RunState {
                     return self;
                 }
                 new.sim_time += dt;
+                // TOWER FIRING -> spawn projectiles (damage resolved on impact)
+                if !new.towers.is_empty() && !new.enemies.is_empty() {
+                    for tw in &mut new.towers {
+                        if tw.cooldown_remaining > 0.0 { tw.cooldown_remaining -= dt; }
+                        if tw.cooldown_remaining > 0.0 { continue; }
+                        // acquire first enemy in range
+                        let cx = tw.x as f64 + 0.5;
+                        let cy = tw.y as f64 + 0.5;
+                        let mut target_pos: Option<(f64,f64)> = None;
+                        for e in &new.enemies {
+                            let dx = e.x - cx; let dy = e.y - cy;
+                            if dx*dx + dy*dy <= tw.range * tw.range { target_pos = Some((e.x, e.y)); break; }
+                        }
+                        if let Some((tx, ty)) = target_pos {
+                            let dx = tx - cx; let dy = ty - cy; let dist = (dx*dx + dy*dy).sqrt().max(1e-6);
+                            let speed = 8.0; // tiles per second
+                            let travel_time = dist / speed;
+                            new.projectiles.push(Projectile { x: cx, y: cy, vx: dx/dist * speed, vy: dy/dist * speed, remaining: travel_time, damage: tw.damage });
+                            tw.cooldown_remaining = 1.0 / tw.fire_rate;
+                        }
+                    }
+                }
+                // UPDATE PROJECTILES & APPLY DAMAGE ON IMPACT
+                if !new.projectiles.is_empty() {
+                    let mut gained_gold = 0u64;
+                    let mut i = 0;
+                    while i < new.projectiles.len() {
+                        let mut remove = false;
+                        {
+                            let p = &mut new.projectiles[i];
+                            p.x += p.vx * dt; p.y += p.vy * dt; p.remaining -= dt;
+                            if p.remaining <= 0.0 {
+                                // impact position
+                                let ix = p.x; let iy = p.y;
+                                // find nearest enemy within hit radius
+                                let mut hit_index: Option<usize> = None;
+                                let mut best_d2 = 0.3_f64 * 0.3_f64;
+                                for (ei, e) in new.enemies.iter().enumerate() {
+                                    let dx = e.x - ix; let dy = e.y - iy; let d2 = dx*dx + dy*dy;
+                                    if d2 <= best_d2 { best_d2 = d2; hit_index = Some(ei); }
+                                }
+                                if let Some(ei) = hit_index {
+                                    if let Some(e) = new.enemies.get_mut(ei) {
+                                        if p.damage >= e.hp { e.hp = 0; } else { e.hp -= p.damage; }
+                                    }
+                                }
+                                remove = true; // projectile consumed
+                            }
+                        }
+                        if remove { new.projectiles.remove(i); } else { i += 1; }
+                    }
+                    // cull dead enemies after projectile impacts
+                    if !new.enemies.is_empty() {
+                        new.enemies.retain(|e| { if e.hp == 0 { gained_gold = gained_gold.saturating_add(1); false } else { true } });
+                        if gained_gold > 0 {
+                            new.currencies.gold = new.currencies.gold.saturating_add(gained_gold);
+                            new.currencies.research = new.currencies.research.saturating_add(gained_gold); // 1 research per kill
+                        }
+                    }
+                }
+                // Maintain path & enemies movement (unchanged below)
                 if new.path.is_empty() {
                     new.path = compute_path(&new);
                 }
@@ -786,24 +948,26 @@ impl Reducible for RunState {
                 }
             }
             PlaceWall { x, y } => {
-                if new.game_over { /* ignore */
-                } else {
+                if new.game_over { /* ignore */ } else {
                     if x < new.grid_size.width && y < new.grid_size.height {
                         let idx = (y * new.grid_size.width + x) as usize;
                         match new.tiles[idx].kind {
                             TileKind::Empty => {
-                                // Tentatively place a plain rock (no gold, no boost) so it can be mined again.
-                                new.tiles[idx].kind = TileKind::Rock {
-                                    has_gold: false,
-                                    boost: None,
-                                };
-                                new.tiles[idx].hardness = 3; // default hardness
+                                dlog(&format!("PlaceWall at ({}, {}) on Empty -> try Rock", x, y));
+                                // Tentatively place a plain rock (mineable again later)
+                                new.tiles[idx].kind = TileKind::Rock { has_gold: false, boost: None };
+                                new.tiles[idx].hardness = 3;
+                                // Check if path is still valid; if not, revert.
                                 let test_path = compute_path(&new);
-                                if test_path.is_empty() {
-                                    // Revert if path blocked
+                                let path_ok = !test_path.is_empty();
+                                dlog(&format!("PlaceWall check path_ok={} (len={})", path_ok, test_path.len()));
+                                if !path_ok {
+                                    // Revert placement to preserve path at all cost
                                     new.tiles[idx].kind = TileKind::Empty;
-                                    new.tiles[idx].hardness = 1; // lighter hardness for empty (not mined)
+                                    new.tiles[idx].hardness = 1;
+                                    dlog("PlaceWall reverted to Empty to preserve path");
                                 } else {
+                                    // Keep placement and update world state
                                     new.path = test_path;
                                     new.path_loop = build_loop_path(&new);
                                     update_loop_geometry(&mut new);
@@ -819,10 +983,44 @@ impl Reducible for RunState {
                                         e.dir_dy = dy;
                                         e.path_index = next_i;
                                     }
+                                    dlog("PlaceWall kept: path updated and enemies reprojected");
                                 }
                             }
                             _ => { /* not allowed */ }
                         }
+                    }
+                }
+            }
+            PlaceTower { x, y } => {
+                if new.game_over { /* ignore */ } else {
+                    if x < new.grid_size.width && y < new.grid_size.height {
+                        // Ensure tile is still Rock (not mined), no existing tower, enough gold
+                        let idx = (y * new.grid_size.width + x) as usize;
+                        let has_tower = new.towers.iter().any(|t| t.x == x && t.y == y);
+                        if !has_tower {
+                            if let TileKind::Rock { boost, .. } = new.tiles[idx].kind.clone() {
+                                if new.currencies.gold >= new.tower_cost {
+                                    // Derive kind from boost for future behavior
+                                    let kind = match boost {
+                                        Some(BoostKind::Slow) => TowerKind::Slow,
+                                        Some(BoostKind::Damage) => TowerKind::Damage,
+                                        _ => TowerKind::Basic,
+                                    };
+                                    new.currencies.gold = new.currencies.gold.saturating_sub(new.tower_cost);
+                                    new.towers.push(Tower::new(x, y, kind, new.tower_base_range, new.tower_base_damage));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            RemoveTower { x, y } => {
+                if new.game_over { /* ignore */ } else {
+                    let before = new.towers.len();
+                    new.towers.retain(|t| !(t.x == x && t.y == y));
+                    if new.towers.len() < before {
+                        // refund full cost for now
+                        new.currencies.gold = new.currencies.gold.saturating_add(new.tower_cost);
                     }
                 }
             }
