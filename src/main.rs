@@ -3,13 +3,11 @@ use std::cell::RefCell; // added for RAF id storage
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure; // restored for callbacks
-use web_sys::{
-    CanvasRenderingContext2d, HtmlCanvasElement, HtmlElement, KeyboardEvent, TouchEvent,
-};
+use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlElement, TouchEvent};
 use yew::prelude::*; // added
 
 mod model;
-use model::{GridSize, RunAction, RunState, TowerKind, UpgradeState};
+use model::{GridSize, RunAction, RunState, TowerKind, UpgradeId};
 
 fn format_time(secs: u64) -> String {
     let h = secs / 3600;
@@ -39,6 +37,7 @@ enum View {
 struct RunViewProps {
     pub run_state: UseReducerHandle<RunState>,
     pub to_upgrades: Callback<()>,
+    pub restart_run: Callback<()>,
 }
 
 #[function_component(RunView)]
@@ -442,27 +441,59 @@ fn run_view(props: &RunViewProps) -> Html {
                             let interact_ok = interact_mask[idx];
                             // Build tuple (color_opt, msg, show_range)
                             let (color_opt, msg, show_range) = if !interact_ok {
-                                (Some("rgba(90,90,90,0.35)"), "Out of reach".to_string(), false)
+                                (
+                                    Some("rgba(90,90,90,0.35)"),
+                                    "Out of reach".to_string(),
+                                    false,
+                                )
                             } else if rs.is_paused || rs.game_over {
                                 (Some("rgba(110,118,129,0.35)"), "Paused".to_string(), false)
                             } else if !matches!(rs.tiles[idx].kind, model::TileKind::Rock { .. }) {
                                 (Some("rgba(248,81,73,0.45)"), "Need Rock".to_string(), false)
-                            } else if rs.towers.iter().any(|t| t.x == hx as u32 && t.y == hy as u32) {
-                                (Some("rgba(219,109,40,0.55)"), "T: remove tower".to_string(), true)
+                            } else if rs
+                                .towers
+                                .iter()
+                                .any(|t| t.x == hx as u32 && t.y == hy as u32)
+                            {
+                                (
+                                    Some("rgba(219,109,40,0.55)"),
+                                    "T: remove tower".to_string(),
+                                    true,
+                                )
                             } else if rs.currencies.gold < rs.tower_cost {
-                                (Some("rgba(248,81,73,0.45)"), format!("Need {} gold", rs.tower_cost), false)
+                                (
+                                    Some("rgba(248,81,73,0.45)"),
+                                    format!("Need {} gold", rs.tower_cost),
+                                    false,
+                                )
                             } else {
-                                (Some("rgba(46,160,67,0.45)"), format!("T: place ({}g)", rs.tower_cost), true)
+                                (
+                                    Some("rgba(46,160,67,0.45)"),
+                                    format!("T: place ({}g)", rs.tower_cost),
+                                    true,
+                                )
                             };
-                            if let Some(c) = color_opt { ctx.set_fill_style_str(c); ctx.fill_rect(hx as f64, hy as f64, 1.0, 1.0); }
+                            if let Some(c) = color_opt {
+                                ctx.set_fill_style_str(c);
+                                ctx.fill_rect(hx as f64, hy as f64, 1.0, 1.0);
+                            }
                             if show_range {
                                 ctx.begin_path();
                                 ctx.set_line_width((1.0 / scale_px).max(0.001));
                                 ctx.set_stroke_style_str("rgba(56,139,253,0.5)");
-                                ctx.arc(hx as f64 + 0.5, hy as f64 + 0.5, rs.tower_base_range, 0.0, std::f64::consts::PI * 2.0).ok();
+                                ctx.arc(
+                                    hx as f64 + 0.5,
+                                    hy as f64 + 0.5,
+                                    rs.tower_base_range,
+                                    0.0,
+                                    std::f64::consts::PI * 2.0,
+                                )
+                                .ok();
                                 ctx.stroke();
                             }
-                            if *tower_feedback_draw != msg { tower_feedback_draw.set(msg); }
+                            if *tower_feedback_draw != msg {
+                                tower_feedback_draw.set(msg);
+                            }
                         }
                     }
                 })
@@ -629,38 +660,76 @@ fn run_view(props: &RunViewProps) -> Html {
                     if e.key() == "t" || e.key() == "T" {
                         e.prevent_default();
                         let (hx, hy) = *hover_ref.borrow();
-                        if hx < 0 || hy < 0 { return; }
+                        if hx < 0 || hy < 0 {
+                            return;
+                        }
                         let handle = run_state_ref_ct.borrow().clone();
                         let rs = (*handle).clone();
                         let gs = rs.grid_size;
-                        if (hx as u32) >= gs.width || (hy as u32) >= gs.height { return; }
+                        if (hx as u32) >= gs.width || (hy as u32) >= gs.height {
+                            return;
+                        }
                         let interact_mask = compute_interactable_mask(&rs);
                         let idx = (hy as u32 * gs.width + hx as u32) as usize;
-                        if !interact_mask[idx] { tower_feedback_hotkey.set("Out of reach".into()); return; }
-                        if rs.is_paused || rs.game_over { tower_feedback_hotkey.set("Paused".into()); return; }
+                        if !interact_mask[idx] {
+                            tower_feedback_hotkey.set("Out of reach".into());
+                            return;
+                        }
+                        if rs.is_paused || rs.game_over {
+                            tower_feedback_hotkey.set("Paused".into());
+                            return;
+                        }
                         let idx2 = idx; // reuse
                         use web_sys::console;
                         if let model::TileKind::Rock { .. } = rs.tiles[idx2].kind {
-                            let has_t = rs.towers.iter().any(|t| t.x == hx as u32 && t.y == hy as u32);
+                            let has_t = rs
+                                .towers
+                                .iter()
+                                .any(|t| t.x == hx as u32 && t.y == hy as u32);
                             if has_t {
-                                console::log_1(&format!("Hotkey: removing tower at ({},{})", hx, hy).into());
-                                handle.dispatch(RunAction::RemoveTower { x: hx as u32, y: hy as u32 });
+                                console::log_1(
+                                    &format!("Hotkey: removing tower at ({},{})", hx, hy).into(),
+                                );
+                                handle.dispatch(RunAction::RemoveTower {
+                                    x: hx as u32,
+                                    y: hy as u32,
+                                });
                                 tower_feedback_hotkey.set("Tower removed".into());
                             } else if rs.currencies.gold < rs.tower_cost {
-                                console::log_1(&format!("Hotkey: insufficient gold (have {}, need {})", rs.currencies.gold, rs.tower_cost).into());
+                                console::log_1(
+                                    &format!(
+                                        "Hotkey: insufficient gold (have {}, need {})",
+                                        rs.currencies.gold, rs.tower_cost
+                                    )
+                                    .into(),
+                                );
                                 tower_feedback_hotkey.set(format!("Need {} gold", rs.tower_cost));
                             } else {
-                                console::log_1(&format!("Hotkey: placing tower at ({},{}) cost {}", hx, hy, rs.tower_cost).into());
-                                handle.dispatch(RunAction::PlaceTower { x: hx as u32, y: hy as u32 });
+                                console::log_1(
+                                    &format!(
+                                        "Hotkey: placing tower at ({},{}) cost {}",
+                                        hx, hy, rs.tower_cost
+                                    )
+                                    .into(),
+                                );
+                                handle.dispatch(RunAction::PlaceTower {
+                                    x: hx as u32,
+                                    y: hy as u32,
+                                });
                                 tower_feedback_hotkey.set("Tower placed".into());
                             }
                         } else {
-                            console::log_1(&format!("Hotkey: invalid tile kind for tower at ({},{})", hx, hy).into());
+                            console::log_1(
+                                &format!("Hotkey: invalid tile kind for tower at ({},{})", hx, hy)
+                                    .into(),
+                            );
                             tower_feedback_hotkey.set("Need Rock".into());
                         }
-                        if let Some(f) = &*draw_ref_k.borrow() { f(); }
+                        if let Some(f) = &*draw_ref_k.borrow() {
+                            f();
+                        }
                     }
-                }) as Box<dyn FnMut(_)> )
+                }) as Box<dyn FnMut(_)>)
             };
             window
                 .add_event_listener_with_callback("keydown", keydown_cb.as_ref().unchecked_ref())
@@ -676,47 +745,72 @@ fn run_view(props: &RunViewProps) -> Html {
                     let button = e.button();
                     if button == 0 {
                         let cam = camera.borrow_mut();
-                        let tile_px = 32.0; let scale_px = cam.zoom * tile_px;
+                        let tile_px = 32.0;
+                        let scale_px = cam.zoom * tile_px;
                         let world_x = ((e.offset_x() as f64) - cam.offset_x) / scale_px;
                         let world_y = ((e.offset_y() as f64) - cam.offset_y) / scale_px;
                         drop(cam);
                         let handle = run_state_ref_ct.borrow().clone();
                         let rs = (*handle).clone();
-                        if rs.is_paused { return; }
+                        if rs.is_paused {
+                            return;
+                        }
                         let gs = rs.grid_size;
-                        let tx = world_x.floor() as i32; let ty = world_y.floor() as i32;
+                        let tx = world_x.floor() as i32;
+                        let ty = world_y.floor() as i32;
                         if tx >= 0 && ty >= 0 && (tx as u32) < gs.width && (ty as u32) < gs.height {
                             let idx = (ty as u32 * gs.width + tx as u32) as usize;
                             let interact_mask = compute_interactable_mask(&rs);
-                            if !interact_mask[idx] { return; }
+                            if !interact_mask[idx] {
+                                return;
+                            }
                             match rs.tiles[idx].kind {
                                 model::TileKind::Rock { .. } | model::TileKind::Wall => {
-                                    let has_tower_here = rs.towers.iter().any(|t| t.x == tx as u32 && t.y == ty as u32);
+                                    let has_tower_here = rs
+                                        .towers
+                                        .iter()
+                                        .any(|t| t.x == tx as u32 && t.y == ty as u32);
                                     if !has_tower_here {
-                                        if !rs.started { handle.dispatch(RunAction::StartRun); }
+                                        if !rs.started {
+                                            handle.dispatch(RunAction::StartRun);
+                                        }
                                         let mut m = mining.borrow_mut();
-                                        m.tile_x = tx; m.tile_y = ty;
+                                        m.tile_x = tx;
+                                        m.tile_y = ty;
                                         let hardness = rs.tiles[idx].hardness.max(1) as f64;
                                         let spd = rs.mining_speed.max(0.0001);
                                         m.required_secs = hardness / spd;
-                                        m.elapsed_secs = 0.0; m.progress = 0.0; m.active = true; m.mouse_down = true;
+                                        m.elapsed_secs = 0.0;
+                                        m.progress = 0.0;
+                                        m.active = true;
+                                        m.mouse_down = true;
                                     }
                                 }
                                 model::TileKind::Empty => {
                                     // allow placing wall only if interactable (already true)
                                     let mut m = mining.borrow_mut();
-                                    m.active = false; m.mouse_down = false; m.progress = 0.0; m.elapsed_secs = 0.0;
-                                    handle.dispatch(RunAction::PlaceWall { x: tx as u32, y: ty as u32 });
+                                    m.active = false;
+                                    m.mouse_down = false;
+                                    m.progress = 0.0;
+                                    m.elapsed_secs = 0.0;
+                                    handle.dispatch(RunAction::PlaceWall {
+                                        x: tx as u32,
+                                        y: ty as u32,
+                                    });
                                 }
                                 _ => {}
                             }
                         }
                     } else {
                         let mut cam = camera.borrow_mut();
-                        cam.panning = true; cam.last_x = e.client_x() as f64; cam.last_y = e.client_y() as f64;
+                        cam.panning = true;
+                        cam.last_x = e.client_x() as f64;
+                        cam.last_y = e.client_y() as f64;
                     }
-                    if let Some(f) = &*draw_ref.borrow() { f(); }
-                }) as Box<dyn FnMut(_)> )
+                    if let Some(f) = &*draw_ref.borrow() {
+                        f();
+                    }
+                }) as Box<dyn FnMut(_)>)
             };
             canvas
                 .add_event_listener_with_callback(
@@ -1133,12 +1227,18 @@ fn run_view(props: &RunViewProps) -> Html {
             let mut sx = (rs.grid_size.width / 2) as u32;
             let mut sy = (rs.grid_size.height / 2) as u32;
             for (i, t) in rs.tiles.iter().enumerate() {
-                if let model::TileKind::Start = t.kind { sx = (i as u32)%rs.grid_size.width; sy = (i as u32)/rs.grid_size.width; break; }
+                if let model::TileKind::Start = t.kind {
+                    sx = (i as u32) % rs.grid_size.width;
+                    sy = (i as u32) / rs.grid_size.width;
+                    break;
+                }
             }
             if let Some(canvas) = canvas_ref_local.cast::<HtmlCanvasElement>() {
-                let w = canvas.width() as f64; let h = canvas.height() as f64;
+                let w = canvas.width() as f64;
+                let h = canvas.height() as f64;
                 let mut cam = camera_ref.borrow_mut();
-                let tile_px = 32.0; let scale_px = cam.zoom * tile_px;
+                let tile_px = 32.0;
+                let scale_px = cam.zoom * tile_px;
                 cam.offset_x = w * 0.5 - scale_px * (sx as f64 + 0.5);
                 cam.offset_y = h * 0.5 - scale_px * (sy as f64 + 0.5);
                 cam.initialized = true;
@@ -1157,14 +1257,24 @@ fn run_view(props: &RunViewProps) -> Html {
         use_effect_with(game_over_dep, move |go| {
             if *go {
                 let rs = (*run_state_handle).clone();
-                let mut sx = (rs.grid_size.width / 2) as u32; let mut sy = (rs.grid_size.height / 2) as u32;
-                for (i, t) in rs.tiles.iter().enumerate() { if let model::TileKind::Start = t.kind { sx = (i as u32)%rs.grid_size.width; sy=(i as u32)/rs.grid_size.width; break; } }
+                let mut sx = (rs.grid_size.width / 2) as u32;
+                let mut sy = (rs.grid_size.height / 2) as u32;
+                for (i, t) in rs.tiles.iter().enumerate() {
+                    if let model::TileKind::Start = t.kind {
+                        sx = (i as u32) % rs.grid_size.width;
+                        sy = (i as u32) / rs.grid_size.width;
+                        break;
+                    }
+                }
                 if let Some(canvas) = canvas_ref_local.cast::<HtmlCanvasElement>() {
-                    let w = canvas.width() as f64; let h = canvas.height() as f64;
+                    let w = canvas.width() as f64;
+                    let h = canvas.height() as f64;
                     let mut cam = camera_ref.borrow_mut();
-                    cam.zoom = 2.5; let tile_px=32.0; let scale_px = cam.zoom * tile_px;
-                    cam.offset_x = w*0.5 - scale_px*(sx as f64 + 0.5);
-                    cam.offset_y = h*0.5 - scale_px*(sy as f64 + 0.5);
+                    cam.zoom = 2.5;
+                    let tile_px = 32.0;
+                    let scale_px = cam.zoom * tile_px;
+                    cam.offset_x = w * 0.5 - scale_px * (sx as f64 + 0.5);
+                    cam.offset_y = h * 0.5 - scale_px * (sy as f64 + 0.5);
                     cam.initialized = true;
                 }
             }
@@ -1233,9 +1343,9 @@ fn run_view(props: &RunViewProps) -> Html {
         })
     };
     let restart_cb = {
-        let run_state = props.run_state.clone();
+        let restart_run = props.restart_run.clone();
         Callback::from(move |_: yew::events::MouseEvent| {
-            run_state.dispatch(RunAction::ResetRun);
+            restart_run.emit(());
         })
     };
     let to_upgrades_click = {
@@ -1433,22 +1543,18 @@ fn run_view(props: &RunViewProps) -> Html {
     }
 }
 
+// === Legend row component ===
 #[derive(Properties, PartialEq, Clone)]
 struct LegendRowProps {
     pub color: &'static str,
     pub label: &'static str,
 }
-
 #[function_component(LegendRow)]
 fn legend_row(props: &LegendRowProps) -> Html {
-    html! {
-        <div style="display:flex; align-items:center; gap:8px; margin:3px 0;">
-            <span style={format!("display:inline-block; width:12px; height:12px; background:{}; border:1px solid #30363d; border-radius:2px;", props.color)}></span>
-            <span>{ props.label }</span>
-        </div>
-    }
+    html! { <div style="display:flex; align-items:center; gap:8px; margin:3px 0;"> <span style={format!("display:inline-block; width:12px; height:12px; background:{}; border:1px solid #30363d; border-radius:2px;", props.color)}></span> <span>{ props.label }</span> </div> }
 }
 
+// === Supporting structs ===
 struct Camera {
     zoom: f64,
     offset_x: f64,
@@ -1458,7 +1564,6 @@ struct Camera {
     last_y: f64,
     initialized: bool,
 }
-
 impl Default for Camera {
     fn default() -> Self {
         Self {
@@ -1472,7 +1577,6 @@ impl Default for Camera {
         }
     }
 }
-
 #[derive(Default)]
 struct Mining {
     tile_x: i32,
@@ -1483,7 +1587,6 @@ struct Mining {
     active: bool,
     mouse_down: bool,
 }
-
 #[derive(Default)]
 struct TouchState {
     single_active: bool,
@@ -1496,8 +1599,107 @@ struct TouchState {
     last_touch_y: f64,
 }
 
+// === Interactable mask helper ===
+fn compute_interactable_mask(rs: &RunState) -> Vec<bool> {
+    use std::collections::VecDeque;
+    let gs = rs.grid_size;
+    let n = rs.tiles.len();
+    let mut mask = vec![false; n];
+    let mut reachable = vec![false; n];
+    let idx = |x: u32, y: u32| (y * gs.width + x) as usize;
+    let inb = |x: i32, y: i32| x >= 0 && y >= 0 && (x as u32) < gs.width && (y as u32) < gs.height;
+    let mut q: VecDeque<(u32, u32)> = VecDeque::new();
+    let mut push = |x: u32, y: u32, reach: &mut Vec<bool>, q: &mut VecDeque<(u32, u32)>| {
+        let i = idx(x, y);
+        if !reach[i] {
+            reach[i] = true;
+            q.push_back((x, y));
+        }
+    };
+    let seeds: Vec<model::Position> = if !rs.path_loop.is_empty() {
+        rs.path_loop.clone()
+    } else {
+        rs.path.clone()
+    };
+    for p in &seeds {
+        if p.x < gs.width && p.y < gs.height {
+            let i = idx(p.x, p.y);
+            if matches!(
+                rs.tiles[i].kind,
+                model::TileKind::Empty | model::TileKind::Start | model::TileKind::Direction { .. }
+            ) {
+                push(p.x, p.y, &mut reachable, &mut q);
+            }
+        }
+    }
+    if q.is_empty() {
+        for (i, t) in rs.tiles.iter().enumerate() {
+            if matches!(t.kind, model::TileKind::Start) {
+                let x = (i as u32) % gs.width;
+                let y = (i as u32) / gs.width;
+                push(x, y, &mut reachable, &mut q);
+                break;
+            }
+        }
+    }
+    let dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    while let Some((x, y)) = q.pop_front() {
+        let i = idx(x, y);
+        mask[i] = true;
+        for (dx, dy) in dirs {
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if !inb(nx, ny) {
+                continue;
+            }
+            let ux = nx as u32;
+            let uy = ny as u32;
+            let ni = idx(ux, uy);
+            match rs.tiles[ni].kind {
+                model::TileKind::Empty
+                | model::TileKind::Start
+                | model::TileKind::Direction { .. } => {
+                    if !reachable[ni] {
+                        reachable[ni] = true;
+                        q.push_back((ux, uy));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for y in 0..gs.height {
+        for x in 0..gs.width {
+            let i = idx(x, y);
+            match rs.tiles[i].kind {
+                model::TileKind::Rock { .. } | model::TileKind::Wall => {
+                    let mut adj = false;
+                    for (dx, dy) in dirs {
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        if inb(nx, ny) {
+                            let ni = idx(nx as u32, ny as u32);
+                            if reachable[ni] {
+                                adj = true;
+                                break;
+                            }
+                        }
+                    }
+                    if adj {
+                        mask[i] = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    mask
+}
+
+// === App component & upgrade tree view ===
 #[function_component(App)]
 fn app() -> Html {
+    use model::{UPGRADE_DEFS, UpgradeId, UpgradeState};
     let view = use_state(|| View::Run);
     let run_state = use_reducer(|| {
         RunState::new_basic(GridSize {
@@ -1505,79 +1707,59 @@ fn app() -> Html {
             height: 25,
         })
     });
-    let _upgrade_state = use_state(|| UpgradeState {
+    let upgrade_state = use_state(|| UpgradeState {
         tower_refund_rate_percent: 100,
         ..Default::default()
     });
-    let last_resources = use_mut_ref(|| (0u64, 0u64, 0u32));
-
+    // Persistence load
     {
-        // Ticker for run time
         let run_state = run_state.clone();
+        let upgrade_state = upgrade_state.clone();
         use_effect_with((), move |_| {
-            let window = web_sys::window().unwrap();
-            let run_state2 = run_state.clone();
-            let tick = Closure::wrap(Box::new(move || {
-                run_state2.dispatch(RunAction::TickSecond);
-            }) as Box<dyn FnMut()>);
-            let id = window
-                .set_interval_with_callback_and_timeout_and_arguments_0(
-                    tick.as_ref().unchecked_ref(),
-                    1000,
-                )
-                .unwrap();
-            let key_cb = {
-                let run_state = run_state.clone();
-                Closure::wrap(Box::new(move |e: KeyboardEvent| {
-                    if e.code() == "Space" {
-                        e.prevent_default();
-                        run_state.dispatch(RunAction::TogglePause);
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(store)) = win.local_storage() {
+                    if let Ok(Some(raw)) = store.get_item("md_upgrade_state") {
+                        if let Ok(us) = serde_json::from_str(&raw) {
+                            upgrade_state.set(us);
+                        }
                     }
-                }) as Box<dyn FnMut(_)>)
-            };
-            window
-                .add_event_listener_with_callback("keydown", key_cb.as_ref().unchecked_ref())
-                .unwrap();
-            move || {
-                let _ = window.clear_interval_with_handle(id);
-                let _ = window.remove_event_listener_with_callback(
-                    "keydown",
-                    key_cb.as_ref().unchecked_ref(),
-                );
-                drop(key_cb);
-                drop(tick);
+                    if let Ok(Some(rp)) = store.get_item("md_research") {
+                        if let Ok(v) = rp.parse::<u64>() {
+                            run_state.dispatch(RunAction::SetResearch { amount: v });
+                        }
+                    }
+                }
             }
+            ();
         });
     }
-
+    // Persistence save upgrade levels
     {
-        // Log resource changes
-        let run_state = run_state.clone();
-        let last_resources = last_resources.clone();
-        use_effect_with(
-            (
-                (*run_state).currencies.gold,
-                (*run_state).currencies.research,
-                (*run_state).life,
-            ),
-            move |deps| {
-                let (g, r, l) = *deps;
-                let mut prev = last_resources.borrow_mut();
-                if prev.0 != g {
-                    clog(&format!("gold: {} -> {}", prev.0, g));
+        let upgrade_state = upgrade_state.clone();
+        use_effect_with((*upgrade_state).levels.clone(), move |_| {
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(store)) = win.local_storage() {
+                    if let Ok(s) = serde_json::to_string(&*upgrade_state) {
+                        let _ = store.set_item("md_upgrade_state", &s);
+                    }
                 }
-                if prev.1 != r {
-                    clog(&format!("research: {} -> {}", prev.1, r));
-                }
-                if prev.2 != l {
-                    clog(&format!("life: {} -> {}", prev.2, l));
-                }
-                *prev = (g, r, l);
-                || ()
-            },
-        );
+            }
+            ();
+        });
     }
-
+    // Persistence save research
+    {
+        let run_state = run_state.clone();
+        use_effect_with(run_state.currencies.research, move |_| {
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(store)) = win.local_storage() {
+                    let _ =
+                        store.set_item("md_research", &run_state.currencies.research.to_string());
+                }
+            }
+            ();
+        });
+    }
     let to_run = {
         let view = view.clone();
         Callback::from(move |_| view.set(View::Run))
@@ -1586,80 +1768,327 @@ fn app() -> Html {
         let view = view.clone();
         Callback::from(move |_| view.set(View::Upgrades))
     };
+    // Purchase upgrade
+    let purchase = {
+        let run_state = run_state.clone();
+        let upgrade_state = upgrade_state.clone();
+        Callback::from(move |id: UpgradeId| {
+            let mut ups = (*upgrade_state).clone();
+            if !ups.can_purchase(id) {
+                return;
+            }
+            if let Some(cost) = ups.next_cost(id) {
+                if run_state.currencies.research < cost {
+                    return;
+                }
+                ups.purchase(id);
+                run_state.dispatch(RunAction::SpendResearch { amount: cost });
+                run_state.dispatch(RunAction::ApplyUpgrades { ups: ups.clone() });
+                upgrade_state.set(ups);
+            }
+        })
+    };
+    // Upgrade tree layout (replaced with categorized web layout)
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum UpgradeCategory {
+        Health,
+        MiningGold,
+        Damage,
+        Boost,
+    }
+    fn category_of(id: UpgradeId) -> UpgradeCategory {
+        use UpgradeId::*;
+        match id {
+            Health | LifeRegen => UpgradeCategory::Health,
+            MiningSpeed | GoldGain | GoldSpawn | StartingGold | GridExpand => {
+                UpgradeCategory::MiningGold
+            }
+            TowerDamage | TowerDamage2 | TowerRange | FireRate | DamageRamp | CritChance
+            | CritDamage => UpgradeCategory::Damage,
+            BoostTilesUnlock | BoostTileFrequency | BoostTileDiversity => UpgradeCategory::Boost,
+        }
+    }
+    struct CatMeta {
+        name: &'static str,
+        color: &'static str,
+    }
+    let cat_metas: std::collections::HashMap<UpgradeCategory, CatMeta> = {
+        use UpgradeCategory::*;
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            Health,
+            CatMeta {
+                name: "Health",
+                color: "#2ea043",
+            },
+        );
+        m.insert(
+            MiningGold,
+            CatMeta {
+                name: "Mining / Gold",
+                color: "#d29922",
+            },
+        );
+        m.insert(
+            Damage,
+            CatMeta {
+                name: "Damage / Offense",
+                color: "#f85149",
+            },
+        );
+        m.insert(
+            Boost,
+            CatMeta {
+                name: "Boost / Utility",
+                color: "#58a6ff",
+            },
+        );
+        m
+    };
+    // Collect upgrades by category preserving declaration order
+    // (Removed obsolete radial layout setup to avoid unused data & compile errors)
+    // let mut per_cat: std::collections::HashMap<UpgradeCategory, Vec<UpgradeId>> = std::collections::HashMap::new();
+    // for def in UPGRADE_DEFS.iter() { per_cat.entry(category_of(def.id)).or_default().push(def.id); }
+    // Pan/zoom state reused
+    let tree_zoom = use_state(|| 1.0_f64);
+    let tree_offset = use_state(|| (0.0_f64, 0.0_f64));
+    let dragging = use_state(|| false);
+    let drag_last = use_state(|| (0.0_f64, 0.0_f64));
+    let container_ref = use_node_ref();
+    let wheel_tree = {
+        let tree_zoom = tree_zoom.clone();
+        let tree_offset = tree_offset.clone();
+        let container_ref = container_ref.clone();
+        Callback::from(move |e: yew::events::WheelEvent| {
+            e.prevent_default();
+            let delta = e.delta_y();
+            let factor = (-delta * 0.001).exp();
+            let old = *tree_zoom;
+            let new = (old * factor).clamp(0.25, 3.0);
+            if let Some(el) = container_ref.cast::<HtmlElement>() {
+                let r = el.get_bounding_client_rect();
+                let cx = e.client_x() as f64 - r.left();
+                let cy = e.client_y() as f64 - r.top();
+                let (ox, oy) = *tree_offset;
+                let wx = (cx - ox) / old;
+                let wy = (cy - oy) / old;
+                tree_offset.set((cx - wx * new, cy - wy * new));
+            }
+            tree_zoom.set(new);
+        })
+    };
+    let mousedown_tree = {
+        let dragging = dragging.clone();
+        let drag_last = drag_last.clone();
+        Callback::from(move |e: yew::events::MouseEvent| {
+            if e.button() == 0 {
+                dragging.set(true);
+                drag_last.set((e.client_x() as f64, e.client_y() as f64));
+            }
+        })
+    };
+    let mousemove_tree = {
+        let dragging = dragging.clone();
+        let drag_last = drag_last.clone();
+        let tree_offset = tree_offset.clone();
+        Callback::from(move |e: yew::events::MouseEvent| {
+            if *dragging {
+                let (lx, ly) = *drag_last;
+                let dx = e.client_x() as f64 - lx;
+                let dy = e.client_y() as f64 - ly;
+                let (ox, oy) = *tree_offset;
+                tree_offset.set((ox + dx, oy + dy));
+                drag_last.set((e.client_x() as f64, e.client_y() as f64));
+            }
+        })
+    };
+    let mouseup_tree = {
+        let dragging = dragging.clone();
+        Callback::from(move |_e: yew::events::MouseEvent| dragging.set(false))
+    };
+    // Category legend (for upgrade view)
+    // (Removed old dynamic legend & purchase handler leftovers to simplify App state before match)
 
-    html! {
-        <div id="root">
-            {
-                match (*view).clone() {
-                    View::Run => html! { <RunView run_state={run_state.clone()} to_upgrades={to_upgrades.clone()} /> },
-                    View::Upgrades => html! {
-                        <div style="position:relative; width:100vw; height:100vh;">
-                            <div id="upgrades-view" style="padding: 12px;">
-                                <h2>{"Upgrades"}</h2>
-                                <p>{"Spend research to improve mining speed, starting gold, tower stats, etc. (coming soon)"}</p>
-                            </div>
-                            <div style="position:absolute; top:12px; right:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px;">
-                                <button onclick={to_run.clone()}>{"Back to Run"}</button>
-                            </div>
-                        </div>
+    // Render match
+    let content = match *view {
+        View::Run => {
+            html! { <RunView run_state={run_state.clone()} to_upgrades={to_upgrades.clone()} restart_run={
+                let run_state=run_state.clone(); let upgrade_state=upgrade_state.clone(); Callback::from(move |_| { run_state.dispatch(RunAction::ResetRunWithUpgrades { ups:(*upgrade_state).clone() }); run_state.dispatch(RunAction::ApplyUpgrades { ups:(*upgrade_state).clone() }); })
+            } /> }
+        }
+        View::Upgrades => {
+            // === New hierarchical tree layout (rooted at TowerDamage) ===
+            use std::collections::{HashMap, HashSet, VecDeque};
+            // Reuse category_of & cat_metas from earlier definitions
+            let research = run_state.currencies.research;
+            // Build dependency edges (logical) from real unlock conditions
+            use model::UnlockCondition::*;
+            let mut raw_edges: Vec<(UpgradeId, UpgradeId)> = Vec::new();
+            for def in UPGRADE_DEFS.iter() {
+                match def.unlock {
+                    Always => {}
+                    AnyLevel(dep) | Maxed(dep) => raw_edges.push((dep, def.id)),
+                }
+            }
+            // Ensure a single visual root: TowerDamage. Attach any Always upgrades (except root) to it visually if they lack an incoming edge.
+            let root = UpgradeId::TowerDamage;
+            let mut has_parent: HashSet<UpgradeId> = HashSet::new();
+            for &(_, c) in &raw_edges {
+                has_parent.insert(c);
+            }
+            for def in UPGRADE_DEFS.iter() {
+                if matches!(def.unlock, Always) && def.id != root && !has_parent.contains(&def.id) {
+                    raw_edges.push((root, def.id));
+                }
+            }
+            // Remove duplicates
+            let mut dedup: HashSet<(usize, usize)> = HashSet::new();
+            let mut edges: Vec<(UpgradeId, UpgradeId)> = Vec::new();
+            for (a, b) in raw_edges {
+                let k = (a.index(), b.index());
+                if dedup.insert(k) {
+                    edges.push((a, b));
+                }
+            }
+            // Compute depth (BFS) from root along edges
+            let mut adj: HashMap<UpgradeId, Vec<UpgradeId>> = HashMap::new();
+            for (a, b) in &edges {
+                adj.entry(*a).or_default().push(*b);
+            }
+            let mut depth: HashMap<UpgradeId, usize> = HashMap::new();
+            depth.insert(root, 0);
+            let mut q = VecDeque::new();
+            q.push_back(root);
+            while let Some(u) = q.pop_front() {
+                let d = depth[&u];
+                if let Some(list) = adj.get(&u) {
+                    for v in list {
+                        if !depth.contains_key(v) {
+                            depth.insert(*v, d + 1);
+                            q.push_back(*v);
+                        }
                     }
                 }
             }
-        </div>
-    }
+            // Any nodes not reached (should not happen) assign max depth +1
+            let maxd_current = depth.values().copied().max().unwrap_or(0);
+            for def in UPGRADE_DEFS.iter() {
+                depth.entry(def.id).or_insert(maxd_current + 1);
+            }
+            // Group by depth
+            let mut by_depth: HashMap<usize, Vec<UpgradeId>> = HashMap::new();
+            for def in UPGRADE_DEFS.iter() {
+                by_depth.entry(depth[&def.id]).or_default().push(def.id);
+            }
+            // Stable ordering inside each depth by category then enum order
+            let mut depths: Vec<usize> = by_depth.keys().copied().collect();
+            depths.sort();
+            let cat_order = [
+                UpgradeCategory::Health,
+                UpgradeCategory::MiningGold,
+                UpgradeCategory::Damage,
+                UpgradeCategory::Boost,
+            ];
+            for d in &depths {
+                if let Some(v) = by_depth.get_mut(d) {
+                    v.sort_by_key(|id| {
+                        let cat = category_of(*id);
+                        let cat_pos = cat_order.iter().position(|c| *c == cat).unwrap_or(99);
+                        (cat_pos, *id as usize)
+                    });
+                }
+            }
+            // Layout constants
+            let node_w = 190.0_f64;
+            let node_h = 140.0_f64;
+            let h_gap = 260.0_f64;
+            let v_gap = 220.0_f64;
+            #[derive(Clone)]
+            struct Layout {
+                id: UpgradeId,
+                x: f64,
+                y: f64,
+            }
+            let mut layouts: Vec<Layout> = Vec::new();
+            for d in depths.iter() {
+                let list = &by_depth[d];
+                let count = list.len();
+                if count == 0 {
+                    continue;
+                }
+                let total_w = (count - 1) as f64 * h_gap;
+                let start_x = -total_w / 2.0;
+                for (i, id) in list.iter().enumerate() {
+                    let x = start_x + i as f64 * h_gap;
+                    let y = *d as f64 * v_gap;
+                    layouts.push(Layout { id: *id, x, y });
+                }
+            }
+            let layout_of = |id: UpgradeId| layouts.iter().find(|l| l.id == id).cloned();
+            // Straight edge lines (parent center bottom -> child center top)
+            let edge_paths: Vec<Html> = edges.iter().filter_map(|(p,c)| { let pl=layout_of(*p)?; let cl=layout_of(*c)?; let x1 = pl.x + node_w*0.5; let y1 = pl.y + node_h; let x2 = cl.x + node_w*0.5; let y2 = cl.y; Some(html!{<line x1={format!("{:.1}",x1)} y1={format!("{:.1}",y1+4.0)} x2={format!("{:.1}",x2)} y2={format!("{:.1}",y2-4.0)} stroke="#374151" stroke-width="3" marker-end="url(#arrowhead)" />}) }).collect();
+            // Pan/zoom state (reuse existing states)
+            let zoom = *tree_zoom;
+            let (off_x, off_y) = *tree_offset;
+            let transform = format!(
+                "transform:translate({}px, {}px) scale({}); transform-origin:0 0;",
+                off_x, off_y, zoom
+            );
+            // Node HTML (reuse existing purchase logic & styling)
+            let nodes_html: Vec<Html> = layouts.iter().map(|lay| {
+                let def=&UPGRADE_DEFS[lay.id.index()]; let ups=&*upgrade_state; let lvl=ups.level(lay.id); let max=def.max_level; let unlocked=ups.is_unlocked(lay.id); let at_max=lvl>=max; let cost=ups.next_cost(lay.id); let affordable=cost.map(|c| c<=research).unwrap_or(false); let mut tip=format!("{}\n{}\nLevel: {}/{}", def.name, def.desc, lvl, max); if let Some(c)=cost { tip.push_str(&format!("\nNext: {} RP", c)); } else { tip.push_str("\nMaxed"); } if !unlocked { match def.unlock { Always=>{}, AnyLevel(dep)=>tip.push_str(&format!("\nRequires any level of {}", UPGRADE_DEFS[dep.index()].name)), Maxed(dep)=>tip.push_str(&format!("\nRequires max {}", UPGRADE_DEFS[dep.index()].name)), } } let bar = if max>0 {(lvl as f64 / max as f64)*100.0} else {0.0}; let disabled=!unlocked || at_max || !affordable; let btn_label = if at_max {"MAX".into()} else { cost.map(|c| format!("Buy ({})", c)).unwrap_or("MAX".into()) }; let idc=lay.id; let cat=category_of(lay.id); let meta=cat_metas.get(&cat).unwrap(); let bg= if at_max { format!("linear-gradient(135deg, {}33, {}55)", meta.color, meta.color) } else { format!("linear-gradient(135deg, {}11, {}33)", meta.color, meta.color) }; let purchase_cb = purchase.clone(); let onclick_cb = { let purchase_cb = purchase_cb.clone(); let idc = idc; Callback::from(move |_| purchase_cb.emit(idc)) }; html!{<div style={format!("position:absolute; width:{node_w}px; height:{node_h}px; transform:translate({}px, {}px);", lay.x, lay.y)}><div style={format!("position:absolute; inset:0; border:2px solid {}; border-radius:14px; padding:8px 10px 42px 10px; background:{}; {}", meta.color, bg, if !unlocked {"opacity:0.35;"} else {""})} title={tip}><div style={format!("font-weight:700; font-size:14px; letter-spacing:.5px; color:{};", meta.color)}>{ def.name }</div><div style="font-size:12px; line-height:1.2; opacity:0.85; white-space:pre-line;">{ def.desc }</div><div style="font-size:11px; opacity:0.7;">{ format!("{}/{}", lvl, max) }</div><button disabled={disabled} style={format!("position:absolute; left:10px; right:10px; bottom:10px; height:26px; font-size:12px; border-radius:8px; border:1px solid {}; background:{}; color:#fff; {}", meta.color, meta.color, if disabled {"opacity:0.55; cursor:not-allowed;"} else {"box-shadow:0 0 0 1px #000 inset;"})} onclick={onclick_cb}>{ btn_label }</button><div style="position:absolute; left:0; bottom:0; height:6px; width:100%; background:#161b22; border-radius:0 0 14px 14px; overflow:hidden;"><div style={format!("height:100%; width:{:.1}%; background:{};", bar, meta.color)}></div></div></div></div>} }).collect();
+            let svg_w = 4000;
+            let svg_h = 4000; // virtual canvas
+            // Static legend (order fixed)
+            let static_legend: Vec<Html> = cat_order.iter().map(|cat| {
+                let meta = cat_metas.get(cat).unwrap();
+                html! {
+                    <div style="display:flex; align-items:center; gap:6px; font-size:11px;">
+                        <span style={format!("width:14px; height:14px; background:{}; display:inline-block; border-radius:4px;", meta.color)}></span>
+                        { meta.name }
+                    </div>
+                }
+            }).collect();
+            // Controls styled like run view (bottom-left)
+            let zoom_in_btn = {
+                let tree_zoom = tree_zoom.clone();
+                Callback::from(move |_| tree_zoom.set((*tree_zoom * 1.25).clamp(0.25, 3.0)))
+            };
+            let zoom_out_btn = {
+                let tree_zoom = tree_zoom.clone();
+                Callback::from(move |_| tree_zoom.set((*tree_zoom * 0.8).clamp(0.25, 3.0)))
+            };
+            let center_btn = {
+                let tree_offset = tree_offset.clone();
+                Callback::from(move |_| tree_offset.set((0.0, 0.0)))
+            };
+            html! {<div style="position:relative; width:100vw; height:100vh; background:#0d1117; overflow:hidden;" ref={container_ref.clone()} onwheel={wheel_tree.clone()} onmousedown={mousedown_tree.clone()} onmousemove={mousemove_tree.clone()} onmouseup={mouseup_tree.clone()} onmouseleave={mouseup_tree}>
+                <div style="position:absolute; top:12px; right:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:160px; display:flex; flex-direction:column; gap:6px;">
+                    <div style="font-weight:600;">{ format!("Research: {}", research) }</div>
+                    <button onclick={to_run.clone()}> {"Back"} </button>
+                </div>
+                <div style="position:absolute; left:12px; bottom:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; display:flex; gap:6px; align-items:center;">
+                    <button onclick={zoom_out_btn}> {"-"} </button>
+                    <button onclick={zoom_in_btn}> {"+"} </button>
+                    <span style="width:8px;"></span>
+                    <button onclick={center_btn}> {"Center"} </button>
+                </div>
+                <div style="position:absolute; right:12px; bottom:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:150px; display:flex; flex-direction:column; gap:4px;">
+                    <div style="font-weight:600; margin-bottom:4px;">{"Categories"}</div>
+                    { for static_legend }
+                </div>
+                <div style={format!("position:absolute; inset:0; cursor:{};", if *dragging {"grabbing"} else {"grab"})}>
+                    <div style={transform}>
+                        <svg style="position:absolute; inset:0; overflow:visible; pointer-events:none;" width={svg_w.to_string()} height={svg_h.to_string()}><defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#374151" /></marker></defs>{ for edge_paths }</svg>
+                        { for nodes_html }
+                    </div>
+                </div>
+            </div>}
+        }
+    }; // fixed: add semicolon after match
+    html! { <div id="root">{ content }</div> }
 }
 
 fn main() {
     yew::Renderer::<App>::new().render();
-}
-
-// New: compute interactable (frontier) mask: path tiles + their 4-neighbors
-fn compute_interactable_mask(rs: &RunState) -> Vec<bool> {
-    use std::collections::VecDeque;
-    let gs = rs.grid_size;
-    let tile_count = rs.tiles.len();
-    let mut mask = vec![false; tile_count]; // final interactable tiles (empties + frontier rocks/walls/start/direction)
-    let mut reachable = vec![false; tile_count]; // reachable empty/start/direction tiles via flood fill
-
-    // Helper: index from (x,y)
-    let idx_of = |x: u32, y: u32| -> usize { (y * gs.width + x) as usize };
-    let in_bounds = |x: i32, y: i32| x >= 0 && y >= 0 && (x as u32) < gs.width && (y as u32) < gs.height;
-
-    // Seed queue with path tiles (rs.path_loop if available else rs.path) that are Empty or Start/Direction.
-    let mut q: VecDeque<(u32,u32)> = VecDeque::new();
-    let mut enqueue = |x: u32, y: u32, reachable: &mut Vec<bool>, q: &mut VecDeque<(u32,u32)>| {
-        let i = idx_of(x,y);
-        if !reachable[i] { reachable[i] = true; q.push_back((x,y)); }
-    };
-    let seeds: Vec<model::Position> = if !rs.path_loop.is_empty() { rs.path_loop.clone() } else { rs.path.clone() };
-    for p in &seeds {
-        if p.x < gs.width && p.y < gs.height {
-            let i = idx_of(p.x, p.y);
-            match rs.tiles[i].kind {
-                model::TileKind::Empty | model::TileKind::Start | model::TileKind::Direction { .. } => enqueue(p.x, p.y, &mut reachable, &mut q),
-                _ => {}
-            }
-        }
-    }
-    // Fallback: if seeds empty, try Start tile
-    if q.is_empty() {
-        for (i,t) in rs.tiles.iter().enumerate() { if matches!(t.kind, model::TileKind::Start) { let x = (i as u32)%gs.width; let y = (i as u32)/gs.width; enqueue(x,y,&mut reachable,&mut q); break; } }
-    }
-
-    // Flood-fill through Empty tiles only (and keep Start/Direction reachable but do not traverse through walls/rocks)
-    let dirs = [(1i32,0i32),(-1,0),(0,1),(0,-1)];
-    while let Some((x,y)) = q.pop_front() {
-        let i = idx_of(x,y);
-        // Mark as interactable (reachable floor / start / direction tiles)
-        mask[i] = true;
-        for (dx,dy) in dirs { let nx = x as i32 + dx; let ny = y as i32 + dy; if !in_bounds(nx,ny) { continue; } let ux = nx as u32; let uy = ny as u32; let ni = idx_of(ux,uy); match rs.tiles[ni].kind { model::TileKind::Empty => { if !reachable[ni] { reachable[ni] = true; q.push_back((ux,uy)); } }, model::TileKind::Start | model::TileKind::Direction { .. } => { if !reachable[ni] { reachable[ni] = true; q.push_back((ux,uy)); } }, _ => {} } }
-    }
-
-    // Frontier: any Rock or Wall adjacent to a reachable tile becomes interactable
-    for y in 0..gs.height { for x in 0..gs.width { let i = idx_of(x,y); match rs.tiles[i].kind { model::TileKind::Rock { .. } | model::TileKind::Wall => { // check neighbors
-                let mut adj_reachable = false; for (dx,dy) in dirs { let nx = x as i32 + dx; let ny = y as i32 + dy; if in_bounds(nx,ny) { let ni = idx_of(nx as u32, ny as u32); if reachable[ni] { adj_reachable = true; break; } } }
-                if adj_reachable { mask[i] = true; }
-            }, _ => {} } } }
-
-    mask
 }

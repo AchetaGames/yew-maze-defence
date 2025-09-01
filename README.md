@@ -14,121 +14,169 @@ Goals:
 3. Place tiles/walls to alter the maze path (cannot fully block the path).
 4. Build towers using gold; towers can be reclaimed at full refund.
 5. Survive as long as possible while enemies scale in difficulty.
-6. End run (death or manual) to access the Upgrade screen and spend meta-currencies.
+6. End run (death or manual) to access the Upgrade Web and spend meta-currencies.
 
 ## Key Mechanics
 ### Grid and Pathing
 - Grid-based map.
-- Initial setup: a short loop near the center (with a slight random offset and randomized entrance/exit orientation); enemies spawn at Start and attempt to loop back to End (completing a lap damages the player/"base").
+- Initial setup: a short loop near the center (with a slight random offset and randomized entrance/exit orientation); enemies spawn at Start and attempt to loop back to End (completing a lap damages the player/base).
 - Players place walls/tiles to modify enemy pathing. It is not permitted to completely block the path; pathfinding must always have at least one valid route from Start to End.
-- Pathfinding: A* or BFS on a 4-connected grid is sufficient. For MVP, we can run pathfinding whenever terrain changes (placement/mining).
+- Pathfinding: A* on a 4‑connected grid; re‑computed on terrain changes.
 
 ### Mining
-- Player can "mine" a tile by holding a button to gradually destroy it. Mining time depends on tile hardness and upgrades.
-- Some tiles contain gold; some provide tower boosts (e.g., range, damage, fire-rate, slow). This information should be visible prior to mining.
-- Mining yields gold and removes the tile (or converts it to a traversable floor), opening up new path possibilities.
+- Hold LMB on a Rock or Wall tile to mine it; progress bar animates inside the tile.
+- Mining speed scales with upgrades; tile hardness determines total required time.
+- Rock variants may contain gold or (once unlocked) boosts.
 
 ### Towers
-- Built on traversable tiles using gold.
-- Tower types (MVP suggestion):
-  - Basic Shooter (single target, moderate fire rate)
-  - Slower (applies slow debuff)
-- Towers can be reclaimed at 100% refund (MVP), encouraging experimentation.
-- Placing on boosted tiles grants permanent bonuses to that tower (e.g., +range/+damage/+fire-rate).
+- Build on Rock tiles (after verifying rules) using gold. (Current: hotkey driven – see Controls.)
+- Towers can be removed (refunded) via hotkey interaction on the same tile.
+- Boost tiles (once unlocked) give attribute modifiers when a tower sits on them.
 
 ### Enemies & Damage
-- Enemies spawn at Start and navigate to End.
-- Completing a loop damages the player. Damage per loop and enemy stats scale over time/waves/difficulty ticks.
-- Difficulty scales per elapsed time and per number of loops completed.
+- Enemies spawn from the Start/Entrance loop region and traverse the current loop path.
+- Completing a loop subtracts Life; when Life hits 0 the run ends (Game Over overlay).
+- Enemy stats scale with elapsed time and loops.
 
 ## Currencies
-- Gold (run-only): Earned from mining and possibly from enemies; used to place towers.
-- Research Points (meta): Earned per run (based on time survived, loops completed, etc.); used to purchase permanent upgrades.
-- Tile Credits (meta/run carryover): Track how many blocks the player mined during a run; in subsequent runs, allow placement of the same number of tiles (or used as a constraint within a run). For MVP, we’ll track blocks mined and map that to allowed placements during the current run.
+- Gold (run‑only): Mining & bounties; used for tower placement.
+- Research (meta): Earned per run; spent on Upgrade Web purchases; persists via localStorage.
+- (Planned/Placeholder) Tile Credits: counted via blocks mined; may govern free placements in future iterations.
 
-## Run & Progression
-- Runs are endless; track total time survived and max records.
-- Player may end a run early to return to Upgrades.
-- On death or early end:
-  - Convert performance into Research Points.
-  - Persist meta-progression (upgrades, records).
-  - Reset run currencies (gold) and transient state.
+## Run & Meta Progression
+- Endless scaling; track time survived, loops, blocks mined.
+- On death or manual exit: convert performance -> Research; keep UpgradeState.
+- Upgrades permanently (meta) enhance base parameters or future world generation.
 
-## UI/UX (Initial)
-- HUD overlays: Time in the top-center (no label), Resources (Gold, Life, Research) stacked in the top-left; menu buttons (Pause/Resume, Upgrades) stacked in the top-right.
-- Center: Game Grid rendered to a canvas; shows enemies, towers, tiles.
-- Right Panel: Build menu (towers, walls), tile info/boosts, mining interaction.
-- Bottom: Controls (Start/Pause, Speed, End Run).
-- Separate "Upgrades" view for meta-progression between runs.
+## UI / HUD Summary
+- Time: Center top (large, minimal UI clutter).
+- Left top panel: Gold, Life, Research, Run id, debugging path stats.
+- Right top panel: Pause/Resume (or Game Over), Path toggle (Show/Hide Path), Upgrades button, contextual tower hover feedback line.
+- Bottom left: Camera controls (Zoom − / +, directional pan arrows, Center on Start).
+- Bottom right: Dynamic tile legend (only shows tile types present) plus colors.
+- Game Over modal: key stats + quick actions (Restart Run / Upgrades).
 
-### Controls (MVP, implemented)
-- Zoom: Mouse wheel.
-- Pan: Middle or Right mouse drag. Right-click context menu is disabled on the canvas.
-- Mine: Left mouse button hold on a Rock tile. A progress bar fills inside the tile; moving the cursor off the tile resets progress. On completion the tile becomes Empty and may award gold.
-- Pause: Spacebar or the Pause/Resume button in the top-right HUD panel. While paused, the run timer stops and mining is disabled, but you can still pan/zoom to plan. The timer starts automatically on the first mining action.
-- On-screen camera controls: bottom-left overlay with Zoom −/+, pan arrows (←↑↓→), and a Center button to re-center on Start. These work while paused.
-- Legend: Bottom-right overlay shows only the tile types currently present on the board (Start, Entrance/Exit, Indestructible, Rock, Gold, Empty).
-- Tile generation (MVP): Rock vs. Gold is randomized; boost tiles are disabled initially and will unlock later. Gold yield per gold tile is a placeholder value and will scale with upgrades.
-- Enemies (MVP): Once the run starts (first mining), enemies spawn near the Entrance every ~2s and follow the current Path to the Exit. Each enemy’s speed and HP are set when it spawns based on elapsed run time and do not change afterwards.
+## Controls (Implemented)
+- Pan: Drag with secondary/middle mouse OR arrow buttons in overlay.
+- Zoom: Mouse wheel (focus‑point zoom). Buttons: − / + in bottom-left.
+- Center: Button to recenter on Start spawn cluster.
+- Mine: Hold LMB on Rock / Wall; move off tile to cancel.
+- Tower Place / Remove: Hover a Rock tile and press `T`.
+  - Shows contextual hover highlight (green = can place, red = invalid, orange = tower present, gray = out of reach or paused).
+  - If a tower exists at the hover tile: `T` removes it (full refund per MVP design).
+  - If no tower and requirements met: `T` places a tower.
+- Pause/Resume: Spacebar or on‑screen button.
+- Path Visualization: Toggle Show/Hide Path; draws simplified polyline or reports (empty) if none.
 
-## MVP Scope
-- Static grid with initial small loop and Start/End.
-- Mining a tile (hold-to-mine) with visible pre-mining info (tooltips/overlay).
-- Place walls to divert enemies; enforce path-not-blocked constraint via pathfinding.
-- One basic tower type; enemies follow path and tick damage upon loop completion.
-- Endless scaling difficulty; record time survived and loops completed.
-- Basic Upgrades screen with a handful of upgrades (mining speed, starting gold, tower stat bumps).
+## New: Upgrade Web (Replaces Linear Tree)
+Instead of a strict top‑down depth tree, upgrades are organized into a radial/web layout with **four color‑coded categories** placed around a virtual origin. This improves readability and reduces edge overlap.
+
+### Categories
+| Category | Color | Position | Focus |
+|----------|-------|----------|-------|
+| Health | #2ea043 (green) | Up (north) | Survivability (Max Life, Regeneration) |
+| Mining / Gold | #d29922 (amber) | Down (south) | Resource generation, map expansion |
+| Damage / Offense | #f85149 (red) | Right (east) | Direct tower DPS, crits, ramping |
+| Boost / Utility | #58a6ff (blue) | Left (west) | Unlocking & improving map boost tiles |
+
+#### Health Upgrades
+- Max Life (Health)
+- Life Regeneration (LifeRegen)
+
+#### Mining / Gold Upgrades
+- Mining Speed (MiningSpeed)
+- Gold Bounty (GoldGain)
+- Gold Spawn Chance (GoldSpawn)
+- Starting Gold (StartingGold)
+- Grid Expansion (GridExpand)
+
+#### Damage / Offense Upgrades
+- Tower Damage I (TowerDamage)
+- Tower Damage II (TowerDamage2)
+- Tower Range (TowerRange)
+- Fire Rate (FireRate)
+- Damage Ramp (DamageRamp)
+- Crit Chance (CritChance)
+- Crit Damage (CritDamage)
+
+#### Boost / Utility Upgrades
+- Unlock Boost Tiles (BoostTilesUnlock)
+- Boost Frequency (BoostTileFrequency)
+- Boost Diversity (BoostTileDiversity)
+
+### Web Navigation
+- **Pan**: Click‑drag anywhere (grab / grabbing cursor states).
+- **Zoom**: Mouse wheel (centered under cursor) or category panel +/- buttons.
+- **Reset**: Resets zoom to 1.0 and recenters offsets.
+- **Center**: Recenter without altering zoom.
+
+### Edge Semantics
+Arrows (curved Bézier paths) run from prerequisite to dependent upgrade:
+- AnyLevel(X) dependency: Appears once you have at least 1 level in X.
+- Maxed(X) dependency: Requires X at max level before target becomes purchasable.
+
+### Node Cards
+Each upgrade node shows:
+- Name (color‑accented header)
+- Description (multi‑line preserved)
+- Level progress (current / max)
+- Purchase button (“Buy (cost)” or “MAX” when maxed)
+- Progress bar at bottom (fill percentage of levels)
+- Faded card if locked; stronger gradient when maxed.
+
+### Category Legend
+Top-left overlay in the Upgrade view: swatches for each category with names for quick orientation.
+
+### Persistence
+- UpgradeState JSON: `localStorage["md_upgrade_state"]`
+- Research value: `localStorage["md_research"]`
+- (Future) Additional run records may be added under new keys.
+
+## Balance & Design Notes (Current State)
+- Most multipliers are % additive stacked (e.g., Mining Speed +15% per level).
+- Damage I + Damage II additively influence base tower damage before other effects (simple linear combination now; may revisit with multiplicative layering later).
+- Crit Damage multiplies final damage after crit trigger.
+- Life Regeneration now correctly belongs to Health category (moved from previous provisional grouping under mining in earlier iteration).
+- Grid Expansion influences new run map size prior to generation; thus expansion impacts spawn distribution and potential path complexity.
 
 ## Technical Architecture
-- Frontend: Rust + Yew (CSR) rendered to a canvas (HTML5 Canvas 2D via web-sys for drawing). Consider an ECS later; MVP can be struct-based simulation tick.
-- State:
-  - RunState (transient): grid, enemies, towers, currencies, stats, current path.
-  - UpgradeState (meta): purchased upgrades, unlocked content, records.
-- Pathfinding: BFS/A* on a 2D array. Recompute on terrain change and periodically as needed.
-- Persistence: Store UpgradeState and records in localStorage (via web-sys or gloo-storage). MVP: serialize using JSON.
+- Frontend: Rust + Yew (CSR) with Canvas 2D rendering.
+- State separation: transient `RunState` vs persistent `UpgradeState`.
+- Simulation ticks: fixed timestep ~16ms for mining/progression; animation frame for rendering.
+- Hotkey system: Global keydown listener (currently for `T` + Pause via Space).
 
-## Data Model (Initial Draft)
-- Position { x, y }, GridSize { width, height }
-- TileKind: Empty | Rock { has_gold, boost? } | Wall | Start | End | Direction { dir, role } | Indestructible
-  - Direction: a non-interactive tile placed one tile away from Start on two sides to mark the initial maze entrance and exit.
-    - dir: Up | Down | Left | Right, indicating arrow direction.
-    - role: Entrance | Exit (Entrance arrow points away from Start; Exit arrow points towards Start).
-  - Indestructible: non-interactive, unmineable tiles used to enforce a clear entrance/exit.
-  - Rock variants for visuals/effects:
-    - basic (no boost),
-    - gold (has_gold=true, grants gold when mined),
-    - cold (boost=Slow),
-    - fire (boost=Damage).
-- BoostKind: Range | Damage | FireRate | Slow
-- Currencies: gold, research, tile_credits
-- RunStats: time_survived_secs, loops_completed, blocks_mined
-- UpgradeState: mining_speed_level, starting_gold_bonus, tower_refund_rate (100% for MVP)
+## Data Model (Snapshot)
+See `src/model.rs` for authoritative definitions (UpgradeId, TileKind, RunState, etc.).
 
-## Development Roadmap
-1. Rendering & Views
-   - Basic App with two views: Run and Upgrades.
-   - Canvas render loop (tick + draw) with placeholder sprites/colors.
-2. Grid & Mining
-   - Grid model; mining interaction; reveal and collect resources/boosts.
-3. Pathfinding & Constraint
-   - BFS/A*; validation preventing fully blocked path; UI feedback when placement is invalid.
-4. Towers & Enemies
-   - Place/remove towers with cost/refund; enemy movement along current path; combat.
-5. Meta & Persistence
-   - End run flow; convert stats to research; upgrades; localStorage save/load.
+## Development Roadmap (Updated Excerpts)
+1. Visual polish for Upgrade Web (edge coloring by category, hover details).  
+2. Additional tower types influenced by specific boost tiles.  
+3. Enemy variety & modifiers; loop-based difficulty scaling curves.  
+4. Meta records panel (best time, deepest loop, richest run).  
+5. Export/import of meta progression.  
+6. Achievements / milestone unlock prompts.
 
-## Notes & Assumptions
-- Runs are endless; scaling is time/loop-based for MVP.
-- Tile info is visible before mining to encourage planning.
-- Full tower refund is intentional to promote experimentation.
-- Balance values are placeholders; expect iteration.
+## Recent Additions / Changelog (High Level)
+- Introduced **Upgrade Web** with four category clusters (replacing linear tree).
+- Added curved dependency edges to reduce overlap.
+- Contextual hover feedback & hotkey `T` for tower place/remove (removed separate placement mode UI).
+- Path visualization toggle with lightweight polyline.
+- Center & camera control overlay; recenter on Game Over.
+- Game Over modal with core statistics and quick access to restart & upgrades.
 
 ## Build & Run
-- Dependencies: Rust, Trunk, wasm32-unknown-unknown target.
-- Commands:
-  - Install target: `rustup target add wasm32-unknown-unknown`
-  - Install trunk: `cargo install trunk`
-  - Run dev server: `trunk serve --open`
+Dependencies: Rust stable, Trunk, wasm32 target.
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install trunk
+trunk serve --open
+```
+
+## Troubleshooting
+- If canvas appears blank: open devtools console for any panic; ensure trunk compiled latest changes.
+- If upgrades fail to appear purchased after refresh: check localStorage keys; clear them to reset.
+- Performance dips: ensure browser tab is active; background throttling may slow timers (expected in inactive tabs).
 
 ## License
 TBD by project owner.

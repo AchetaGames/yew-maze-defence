@@ -1,2 +1,49 @@
-Dev notes for current session:
-- Fix timer not running, it is stuck in the open state and
+Here’s the current upgrade roster extracted from the code, grouped by category with their core data. (Fields: (Enum Id) – Description | Max Lvl | Base Cost | Cost Growth | Unlock Condition)
+HEALTH
+Max Life (Health) – +5 max life / lvl (new run) | 5 | 14 | 1.55 | Always
+Life Regeneration (LifeRegen) – +0.5 life/sec / lvl (in-run) | 4 | 28 | 1.6 | AnyLevel(Health)
+MINING / GOLD
+Mining Speed (MiningSpeed) – +15% base mining speed / lvl | 5 | 10 | 1.6 | Always
+Gold Bounty (GoldGain) – +4% gold per kill / lvl (base 1 once any level) | 5 | 20 | 1.6 | AnyLevel(MiningSpeed)
+Gold Spawn (GoldSpawn) – +3% chance a rock has gold / lvl (future runs) | 5 | 22 | 1.6 | AnyLevel(MiningSpeed)
+Starting Gold (StartingGold) – +3 starting gold / lvl (new run) | 4 | 10 | 1.5 | Always
+Grid Expansion (GridExpand) – +2 grid size (w & h) / lvl (future runs) | 3 | 60 | 1.8 | Maxed(MiningSpeed)
+DAMAGE / OFFENSE
+Tower Damage I (TowerDamage) – +12% base tower damage / lvl | 5 | 12 | 1.6 | Always
+Tower Damage II (TowerDamage2) – +10% additional tower damage / lvl | 5 | 30 | 1.7 | Maxed(TowerDamage)
+Tower Range (TowerRange) – +6% tower range / lvl | 5 | 14 | 1.55 | AnyLevel(TowerDamage)
+Fire Rate (FireRate) – +8% fire rate / lvl | 5 | 16 | 1.55 | AnyLevel(TowerDamage)
+Damage Ramp (DamageRamp) – +3% damage per enemy second alive / lvl | 4 | 32 | 1.65 | AnyLevel(FireRate)
+Crit Chance (CritChance) – +2% crit chance / lvl | 5 | 25 | 1.65 | AnyLevel(FireRate)
+Crit Damage (CritDamage) – +20% crit damage / lvl | 5 | 40 | 1.7 | Maxed(CritChance)
+BOOST / UTILITY
+Unlock Boost Tiles (BoostTilesUnlock) – Enable spawning of Slow & Damage boost tiles (future runs) | 1 | 30 | 2.0 | AnyLevel(MiningSpeed)
+Boost Frequency (BoostTileFrequency) – +20% boost tile weight / lvl | 4 | 35 | 1.65 | AnyLevel(BoostTilesUnlock)
+Boost Diversity (BoostTileDiversity) – Adds new boost variants (future runs) | 1 | 55 | 2.0 | Maxed(BoostTileFrequency)
+RAW ORDER AS DEFINED (for reference / if you keep declaration order)
+MiningSpeed
+TowerDamage
+StartingGold
+Health
+TowerRange
+FireRate
+GoldGain
+GoldSpawn
+LifeRegen
+BoostTilesUnlock
+TowerDamage2
+DamageRamp
+BoostTileFrequency
+CritChance
+CritDamage
+BoostTileDiversity
+GridExpand
+UNLOCK CONDITION LEGEND
+Always: visible & purchasable immediately (given cost and resources).
+AnyLevel(X): appears/activates once X has at least level 1.
+Maxed(X): appears/activates only after X reaches its max level.
+LET ME KNOW IF YOU ALSO WANT
+Suggested re-categorization
+Power curve / cost curve analysis
+Proposed dependency graph simplification
+Early / mid / late game tier tagging
