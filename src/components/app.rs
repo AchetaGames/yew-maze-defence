@@ -51,10 +51,12 @@ pub fn app() -> Html {
             || ()
         });
     }
-    // Persist upgrade_state changes
+    // Persist upgrade_state changes & apply to current run
     {
         let upgrade_state = upgrade_state.clone();
+        let run_state = run_state.clone();
         use_effect_with((*upgrade_state).levels.clone(), move |_| {
+            // persist
             if let Some(win) = web_sys::window() {
                 if let Ok(Some(store)) = win.local_storage() {
                     if let Ok(s) = serde_json::to_string(&*upgrade_state) {
@@ -62,6 +64,10 @@ pub fn app() -> Html {
                     }
                 }
             }
+            // apply to current run (non-destructive)
+            run_state.dispatch(RunAction::ApplyUpgrades {
+                ups: (*upgrade_state).clone(),
+            });
             || ()
         });
     }

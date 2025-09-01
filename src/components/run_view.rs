@@ -555,6 +555,20 @@ pub fn run_view(props: &RunViewProps) -> Html {
                     16,
                 )
                 .unwrap();
+            // Seconds interval
+            let second_tick = {
+                let run_state_ref_ct = run_state_ref.clone();
+                Closure::wrap(Box::new(move || {
+                    let handle = run_state_ref_ct.borrow().clone();
+                    handle.dispatch(RunAction::TickSecond);
+                }) as Box<dyn FnMut()>)
+            };
+            let second_tick_id = window
+                .set_interval_with_callback_and_timeout_and_arguments_0(
+                    second_tick.as_ref().unchecked_ref(),
+                    1000,
+                )
+                .unwrap();
             // Wheel zoom
             let wheel_cb = {
                 let camera = camera.clone();
@@ -1092,12 +1106,14 @@ pub fn run_view(props: &RunViewProps) -> Html {
                 );
                 window_clone.clear_interval_with_handle(mining_tick_id);
                 window_clone.clear_interval_with_handle(sim_tick_id);
+                window_clone.clear_interval_with_handle(second_tick_id);
                 if let Some(id) = *raf_id.borrow() {
                     let _ = window_clone.cancel_animation_frame(id);
                 }
                 let _keep_alive = (
                     &mining_tick,
                     &sim_tick,
+                    &second_tick,
                     &wheel_cb,
                     &mousedown_cb,
                     &mousemove_cb,
@@ -1390,10 +1406,10 @@ pub fn run_view(props: &RunViewProps) -> Html {
             <button onclick={zoom_out.clone()}> {"-"} </button>
             <button onclick={zoom_in.clone()}> {"+"} </button>
             <span style="width:8px;"></span>
-            <button onclick={pan_by(64.0,0.0)}>{"←"}</button>
-            <button onclick={pan_by(0.0,64.0)}>{"↑"}</button>
-            <button onclick={pan_by(0.0,-64.0)}>{"↓"}</button>
-            <button onclick={pan_by(-64.0,0.0)}>{"→"}</button>
+            <button onclick={pan_by(-64.0,0.0)}> {"←"} </button>
+            <button onclick={pan_by(0.0,-64.0)}> {"↑"} </button>
+            <button onclick={pan_by(0.0,64.0)}> {"↓"} </button>
+            <button onclick={pan_by(64.0,0.0)}> {"→"} </button>
             <span style="width:8px;"></span>
             <button onclick={center_on_start.clone()}> {"Center"} </button>
         </div>

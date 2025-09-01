@@ -871,24 +871,139 @@ impl UpgradeId {
     pub fn index(self) -> usize {
         self as usize
     }
+    pub fn key(self) -> &'static str {
+        match self {
+            UpgradeId::MiningSpeed => "MiningSpeed",
+            UpgradeId::TowerDamage => "TowerDamage",
+            UpgradeId::TowerRange => "TowerRange",
+            UpgradeId::FireRate => "FireRate",
+            UpgradeId::CritChance => "CritChance",
+            UpgradeId::CritDamage => "CritDamage",
+            UpgradeId::StartingGold => "StartingGold",
+            UpgradeId::Health => "Health",
+            UpgradeId::GoldGain => "GoldGain",
+            UpgradeId::GoldSpawn => "GoldSpawn",
+            UpgradeId::BoostTilesUnlock => "BoostTilesUnlock",
+            UpgradeId::BoostTileFrequency => "BoostTileFrequency",
+            UpgradeId::BoostTileDiversity => "BoostTileDiversity",
+            UpgradeId::LifeRegen => "LifeRegen",
+            UpgradeId::TowerDamage2 => "TowerDamage2",
+            UpgradeId::DamageRamp => "DamageRamp",
+            UpgradeId::GridExpand => "GridExpand",
+        }
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UpgradeState {
-    pub levels: Vec<u8>,
+    pub levels: std::collections::HashMap<String, u8>,
     pub tower_refund_rate_percent: u8,
 }
 impl Default for UpgradeState {
     fn default() -> Self {
+        use std::collections::HashMap;
+        let mut levels = HashMap::new();
+        for def in UPGRADE_DEFS.iter() {
+            levels.insert(def.id.key().to_string(), 0u8);
+        }
         Self {
-            levels: vec![0; UPGRADE_DEFS.len()],
+            levels,
             tower_refund_rate_percent: 100,
         }
     }
 }
+
+impl serde::Serialize for UpgradeState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        use std::collections::HashMap;
+        // ensure we always serialize all known upgrades (missing -> 0) to keep stability
+        let mut map: HashMap<&str, u8> = HashMap::new();
+        for def in UPGRADE_DEFS.iter() {
+            map.insert(def.id.key(), *self.levels.get(def.id.key()).unwrap_or(&0));
+        }
+        let mut st = serializer.serialize_struct("UpgradeState", 2)?;
+        st.serialize_field("levels", &map)?; // map form
+        st.serialize_field("tower_refund_rate_percent", &self.tower_refund_rate_percent)?;
+        st.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for UpgradeState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{MapAccess, Visitor};
+        use std::collections::HashMap;
+        use std::fmt;
+
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum LevelsRepr {
+            LegacyVec(Vec<u8>),
+            Map(HashMap<String, u8>),
+        }
+
+        struct RawVisitor;
+        impl<'de> Visitor<'de> for RawVisitor {
+            type Value = UpgradeState;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("upgrade state object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                // legacy format handled explicitly; ignoring unknown fields
+                let mut levels_repr: Option<LevelsRepr> = None;
+                let mut refund: u8 = 100;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "levels" => {
+                            levels_repr = Some(map.next_value()?);
+                        }
+                        "tower_refund_rate_percent" => {
+                            refund = map.next_value()?;
+                        }
+                        _ => {
+                            // ignore unknown top-level keys
+                            let _: serde_json::Value = map.next_value()?;
+                        }
+                    }
+                }
+                let mut levels: HashMap<String, u8> = HashMap::new();
+                match levels_repr {
+                    Some(LevelsRepr::LegacyVec(v)) => {
+                        // legacy vector indexing by enum order
+                        for (i, def) in UPGRADE_DEFS.iter().enumerate() {
+                            if let Some(lv) = v.get(i) {
+                                levels.insert(def.id.key().to_string(), *lv);
+                            } else {
+                                levels.insert(def.id.key().to_string(), 0);
+                            }
+                        }
+                    }
+                    Some(LevelsRepr::Map(m)) => {
+                        // filter to known upgrades only
+                        for def in UPGRADE_DEFS.iter() {
+                            let lv = *m.get(def.id.key()).unwrap_or(&0);
+                            levels.insert(def.id.key().to_string(), lv);
+                        }
+                        // unknown (removed) upgrades ignored automatically
+                    }
+                    None => {
+                        for def in UPGRADE_DEFS.iter() {
+                            levels.insert(def.id.key().to_string(), 0);
+                        }
+                    }
+                }
+                Ok(UpgradeState {
+                    levels,
+                    tower_refund_rate_percent: refund,
+                })
+            }
+        }
+        deserializer.deserialize_map(RawVisitor)
+    }
+}
 impl UpgradeState {
     pub fn level(&self, id: UpgradeId) -> u8 {
-        *self.levels.get(id.index()).unwrap_or(&0)
+        *self.levels.get(id.key()).unwrap_or(&0)
     }
     pub fn max_level(&self, id: UpgradeId) -> u8 {
         UPGRADE_DEFS[id.index()].max_level
@@ -916,7 +1031,7 @@ impl UpgradeState {
     pub fn purchase(&mut self, id: UpgradeId) {
         let cur = self.level(id);
         if cur < self.max_level(id) {
-            self.levels[id.index()] = cur + 1;
+            self.levels.insert(id.key().to_string(), cur + 1);
         }
     }
 }
