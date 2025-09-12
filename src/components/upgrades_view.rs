@@ -1,5 +1,5 @@
-use crate::model::{RunAction, RunState, UpgradeId, UpgradeState, UPGRADE_DEFS};
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::model::{RunAction, RunState, UpgradeId, UpgradeState, UPGRADE_DEFS, play_area_size_for_level};
+use std::collections::{HashMap, HashSet};
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq, Clone)]
@@ -10,420 +10,511 @@ pub struct UpgradesViewProps {
     pub purchase: Callback<UpgradeId>,
 }
 
+fn cat_symbol(cat: &str) -> &'static str {
+    match cat {
+        "Damage" => "⚔",
+        "Health" => "❤",
+        "Economy" => "💰",
+        "Boost" => "✦",
+        "PlayArea" => "⛶",
+        _ => "●",
+    }
+}
+
+fn compute_depths() -> HashMap<UpgradeId, usize> {
+    let mut depth: HashMap<UpgradeId, usize> = HashMap::new();
+    depth.insert(UpgradeId::TowerDamage1, 0);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for def in UPGRADE_DEFS {
+            if def.id == UpgradeId::TowerDamage1 {
+                continue;
+            }
+            let d = if def.prerequisites.is_empty() {
+                Some(1)
+            } else {
+                let mut ok = true;
+                let mut maxd = 0usize;
+                for p in def.prerequisites {
+                    if let Some(pd) = depth.get(&p.id) {
+                        maxd = maxd.max(*pd);
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok { Some(maxd + 1) } else { None }
+            };
+            if let Some(v) = d {
+                if depth.insert(def.id, v) != Some(v) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    for def in UPGRADE_DEFS {
+        depth.entry(def.id).or_insert(2);
+    }
+    depth
+}
+
 #[function_component(UpgradesView)]
 pub fn upgrades_view(props: &UpgradesViewProps) -> Html {
-    // Pan / zoom state
-    let tree_zoom = use_state(|| 1.0_f64);
-    let tree_offset = use_state(|| (0.0_f64, 0.0_f64));
+    // --- State ---
+    let zoom = use_state(|| 1.0_f64);
+    let offset = use_state(|| (0.0_f64, 0.0_f64));
     let dragging = use_state(|| false);
     let drag_last = use_state(|| (0.0_f64, 0.0_f64));
     let container_ref = use_node_ref();
-    // New: reset confirmation state
-    let show_reset_confirm = use_state(|| false);
+    let hover_id = use_state(|| Option::<UpgradeId>::None);
 
-    // Handlers
-    let wheel_tree = {
-        let tree_zoom = tree_zoom.clone();
-        let tree_offset = tree_offset.clone();
-        let container_ref = container_ref.clone();
-        Callback::from(move |e: yew::events::WheelEvent| {
-            e.prevent_default();
-            let delta = e.delta_y();
-            let factor = (-delta * 0.001).exp();
-            let old = *tree_zoom;
-            let new = (old * factor).clamp(0.25, 3.0);
-            if let Some(el) = container_ref.cast::<web_sys::HtmlElement>() {
-                let r = el.get_bounding_client_rect();
-                let cx = e.client_x() as f64 - r.left();
-                let cy = e.client_y() as f64 - r.top();
-                let (ox, oy) = *tree_offset;
-                let wx = (cx - ox) / old;
-                let wy = (cy - oy) / old;
-                tree_offset.set((cx - wx * new, cy - wy * new));
-            }
-            tree_zoom.set(new);
-        })
-    };
-    let mousedown_tree = {
-        let dragging = dragging.clone();
-        let drag_last = drag_last.clone();
-        Callback::from(move |e: yew::events::MouseEvent| {
-            if e.button() == 0 {
-                dragging.set(true);
-                drag_last.set((e.client_x() as f64, e.client_y() as f64));
-            }
-        })
-    };
-    let mousemove_tree = {
-        let dragging = dragging.clone();
-        let drag_last = drag_last.clone();
-        let tree_offset = tree_offset.clone();
-        Callback::from(move |e: yew::events::MouseEvent| {
-            if *dragging {
-                let (lx, ly) = *drag_last;
-                let dx = e.client_x() as f64 - lx;
-                let dy = e.client_y() as f64 - ly;
-                let (ox, oy) = *tree_offset;
-                tree_offset.set((ox + dx, oy + dy));
-                drag_last.set((e.client_x() as f64, e.client_y() as f64));
-            }
-        })
-    };
-    let mouseup_tree = {
-        let dragging = dragging.clone();
-        Callback::from(move |_| dragging.set(false))
-    };
-
-    // Snapshot
     let research = props.run_state.currencies.research;
-    let upgrade_state_snapshot = (*props.upgrade_state).clone();
+    let ups = (*props.upgrade_state).clone();
 
-    // Build dependency edges strictly from prerequisites
-    let mut raw_edges: Vec<(UpgradeId, UpgradeId)> = Vec::new();
-    for def in UPGRADE_DEFS.iter() {
-        for prereq in def.prerequisites {
-            raw_edges.push((prereq.id, def.id));
-        }
-    }
-    // Choose a root: first upgrade with no prerequisites (TowerDamage1 exists)
-    let root = UpgradeId::TowerDamage1;
+    // Visibility: only show upgrades whose prerequisites are fully met
+    let visible_ids: HashSet<UpgradeId> = UPGRADE_DEFS.iter()
+        .filter(|d| d.prerequisites.iter().all(|p| ups.level(p.id) >= p.level))
+        .map(|d| d.id)
+        .collect();
 
-    // Remove duplicate edges
-    let mut seen = HashSet::new();
-    let mut edges: Vec<(UpgradeId, UpgradeId)> = Vec::new();
-    for (a, b) in raw_edges.into_iter() {
-        if seen.insert((a as usize, b as usize)) {
-            edges.push((a, b));
-        }
-    }
-    // Adjacency + depth BFS
-    let mut adj: HashMap<UpgradeId, Vec<UpgradeId>> = HashMap::new();
-    for (a, b) in &edges {
-        adj.entry(*a).or_default().push(*b);
-    }
-    let mut depth: HashMap<UpgradeId, usize> = HashMap::new();
-    depth.insert(root, 0);
-    let mut q = VecDeque::new();
-    q.push_back(root);
-    while let Some(u) = q.pop_front() {
-        let d = depth[&u];
-        if let Some(list) = adj.get(&u) {
-            for v in list {
-                if !depth.contains_key(v) {
-                    depth.insert(*v, d + 1);
-                    q.push_back(*v);
-                }
-            }
-        }
-    }
-    // Any node not reached (should not happen unless disconnected) -> place after max depth
-    let maxd = depth.values().copied().max().unwrap_or(0);
-    for def in UPGRADE_DEFS.iter() {
-        depth.entry(def.id).or_insert(maxd + 1);
-    }
-    let mut by_depth: HashMap<usize, Vec<UpgradeId>> = HashMap::new();
-    for def in UPGRADE_DEFS.iter() {
-        by_depth.entry(depth[&def.id]).or_default().push(def.id);
-    }
-    let mut depths: Vec<usize> = by_depth.keys().copied().collect();
-    depths.sort();
-
-    // Layout parameters
-    let node_w = 190.0;
-    let node_h = 140.0;
-    let h_gap = 260.0;
-    let v_gap = 220.0;
-    #[derive(Clone)]
-    struct Layout {
-        id: UpgradeId,
-        x: f64,
-        y: f64,
-    }
-    let mut layouts: Vec<Layout> = Vec::new();
-    for d in &depths {
-        let list = &by_depth[d];
-        if list.is_empty() {
-            continue;
-        }
-        let total_w = (list.len().saturating_sub(1)) as f64 * h_gap;
-        let start_x = -total_w / 2.0;
-        for (i, id) in list.iter().enumerate() {
-            let x = start_x + i as f64 * h_gap;
-            let y = *d as f64 * v_gap;
-            layouts.push(Layout { id: *id, x, y });
-        }
-    }
-    let layout_of = |id: UpgradeId| layouts.iter().find(|l| l.id == id).cloned();
-
-    // Auto-center on mount
+    // Auto-center on first mount
     {
-        let tree_offset = tree_offset.clone();
-        let tree_zoom = tree_zoom.clone();
+        let offset = offset.clone();
         let container_ref = container_ref.clone();
-        let layouts_clone = layouts.clone();
         use_effect_with((), move |_| {
-            if let Some(el) = container_ref.cast::<web_sys::HtmlElement>() {
-                if let Some(root_layout) = layouts_clone.iter().find(|l| l.id == root) {
-                    let rect = el.get_bounding_client_rect();
-                    let zoom = *tree_zoom;
-                    let root_cx = root_layout.x + node_w * 0.5;
-                    let root_cy = root_layout.y + node_h * 0.5;
-                    let new_ox = rect.width() / 2.0 - root_cx * zoom;
-                    let new_oy = rect.height() / 2.0 - root_cy * zoom;
-                    tree_offset.set((new_ox, new_oy));
-                }
+            if let Some(el) = container_ref.cast::<web_sys::Element>() {
+                let rect = el.get_bounding_client_rect();
+                offset.set((rect.width() / 2.0, rect.height() / 2.0));
             }
             || ()
         });
     }
 
-    // Edge SVG lines
-    let edge_paths: Vec<Html> = edges
-        .iter()
-        .filter_map(|(p, c)| {
-            let pl = layout_of(*p)?;
-            let cl = layout_of(*c)?;
-            let x1 = pl.x + node_w * 0.5;
-            let y1 = pl.y + node_h;
-            let x2 = cl.x + node_w * 0.5;
-            let y2 = cl.y;
-            Some(html! {
-                <line
-                    x1={format!("{:.1}", x1)}
-                    y1={format!("{:.1}", y1 + 4.0)}
-                    x2={format!("{:.1}", x2)}
-                    y2={format!("{:.1}", y2 - 4.0)}
-                    stroke="#374151"
-                    stroke-width="3"
-                    marker-end="url(#arrowhead)"
-                />
-            })
-        })
-        .collect();
+    // --- Layout prep ---
+    let depths = compute_depths();
+    let mut rings: HashMap<usize, Vec<UpgradeId>> = HashMap::new();
+    let mut max_depth = 0usize;
+    for def in UPGRADE_DEFS { // group by depth
+        let d = *depths.get(&def.id).unwrap_or(&1);
+        if d > 0 {
+            rings.entry(d).or_default().push(def.id);
+            max_depth = max_depth.max(d);
+        }
+    }
 
-    let zoom = *tree_zoom;
-    let (off_x, off_y) = *tree_offset;
-    let transform = format!(
-        "transform:translate({}px, {}px) scale({}); transform-origin:0 0;",
-        off_x, off_y, zoom
-    );
+    // Position map (root at origin)
+    let mut pos: HashMap<UpgradeId, (f64, f64)> = HashMap::new();
+    pos.insert(UpgradeId::TowerDamage1, (0.0, 0.0));
 
-    // Node cards
-    let nodes_html: Vec<Html> = layouts
-        .iter()
-        .map(|lay| {
-            let def = &UPGRADE_DEFS[lay.id as usize];
-            let ups = &upgrade_state_snapshot;
-            let lvl = ups.level(lay.id);
-            let max = def.max_level;
-            let unlocked = ups.is_unlocked(lay.id);
-            let at_max = lvl >= max;
-            let cost = ups.next_cost(lay.id);
-            let affordable = cost.map(|c| c <= research).unwrap_or(false);
-            let name = def.id.key();
-            let desc = def.effect_per_level;
-            // Build tooltip
-            let mut tip = format!("{}\n{}\nLevel: {}/{}", name, desc, lvl, max);
-            if let Some(c) = cost {
-                tip.push_str(&format!("\nNext: {} RP", c));
-            } else {
-                tip.push_str("\nMaxed");
+    // Precompute parent & child lists per node for quick lookup
+    let mut parents: HashMap<UpgradeId, Vec<UpgradeId>> = HashMap::new();
+    let mut children: HashMap<UpgradeId, Vec<UpgradeId>> = HashMap::new();
+    for def in UPGRADE_DEFS {
+        for p in def.prerequisites {
+            parents.entry(def.id).or_default().push(p.id);
+            children.entry(p.id).or_default().push(def.id);
+        }
+    }
+
+    let base_ring = 150.0_f64; // radius of depth 1 circle
+    let ring_gap = 170.0_f64;  // slightly tighter
+    let node_diam = 48.0_f64;
+    let node_padding = 28.0_f64; // a bit more padding
+
+    // Improved ring placement: distribute entire ring using parent centroid angles
+    for depth_idx in 1..=max_depth {
+        if let Some(list) = rings.get_mut(&depth_idx) {
+            if list.is_empty() { continue; }
+            let r = base_ring + (depth_idx as f64 - 1.0) * ring_gap;
+            // Compute base angles
+            let mut items: Vec<(UpgradeId, f64)> = Vec::with_capacity(list.len());
+            for id in list.iter().copied() {
+                let ang = if let Some(ps) = parents.get(&id) {
+                    let mut sx = 0.0;
+                    let mut sy = 0.0;
+                    let mut cnt = 0.0;
+                    for pid in ps {
+                        if let Some(&(px, py)) = pos.get(&pid) {
+                            sx += px;
+                            sy += py;
+                            cnt += 1.0;
+                        }
+                    }
+                    if cnt > 0.0 { sy.atan2(sx) } else { // fallback deterministic
+                        let h = id as u32 as f64;
+                        (h * 2.399963229728653).rem_euclid(std::f64::consts::TAU)
+                    }
+                } else {
+                    let h = id as u32 as f64;
+                    (h * 2.399963229728653).rem_euclid(std::f64::consts::TAU)
+                };
+                items.push((id, ang));
             }
-            if !unlocked {
-                if !def.prerequisites.is_empty() {
-                    tip.push_str("\nPrerequisites:");
-                    for p in def.prerequisites {
-                        let cur = ups.level(p.id);
-                        tip.push_str(&format!("\n- {} {} (you: {})", p.id.key(), p.level, cur));
+            // Sort by angle
+            items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            // Enforce minimum separation
+            let min_sep_angle = (node_diam + node_padding) / r; // approximate
+            let n = items.len();
+            // Forward pass
+            let mut prev = None;
+            for (_, a) in items.iter_mut() {
+                while *a < 0.0 { *a += std::f64::consts::TAU; }
+                while *a >= std::f64::consts::TAU { *a -= std::f64::consts::TAU; }
+                if let Some(p) = prev { if *a < p + min_sep_angle { *a = p + min_sep_angle; } }
+                prev = Some(*a);
+            }
+            // Overflow handling
+            if let Some(last) = prev {
+                if last >= std::f64::consts::TAU { // compress into full circle
+                    let span = last - items[0].1;
+                    if span > 1e-6 { // scale angles into [first, first+TAU)
+                        let first = items[0].1;
+                        for (_, a) in items.iter_mut() { *a = first + (*a - first) / span * (std::f64::consts::TAU - min_sep_angle); }
+                    } else { // all equal -> equal spacing
+                        for (i, (_, a)) in items.iter_mut().enumerate() { *a = i as f64 * (std::f64::consts::TAU / n as f64); }
                     }
                 }
             }
-            let bar = if max > 0 {
-                (lvl as f64 / max as f64) * 100.0
-            } else {
-                0.0
-            };
-            let disabled = !unlocked || at_max || !affordable;
-            let btn_label = if at_max {
-                "MAX".into()
-            } else {
-                cost.map(|c| format!("Buy ({})", c)).unwrap_or("MAX".into())
-            };
-            let idc = lay.id;
-            let onclick_cb = {
-                let purchase = props.purchase.clone();
-                Callback::from(move |_| purchase.emit(idc))
-            };
-            html! {
-                <div style={format!("position:absolute; width:{}px; height:{}px; transform:translate({}px, {}px);", node_w, node_h, lay.x, lay.y)}>
-                    <div
-                        style="position:absolute; inset:0; border:2px solid #374151; border-radius:14px; padding:8px 10px 42px 10px; background:#111821;"
-                        title={tip}
-                    >
-                        <div style="font-weight:700; font-size:14px; letter-spacing:.5px;">{ name }</div>
-                        <div style="font-size:12px; line-height:1.2; opacity:0.85; white-space:pre-line;">{ desc }</div>
-                        <div style="font-size:11px; opacity:0.7;">{ format!("{}/{}", lvl, max) }</div>
-                        <button
-                            disabled={disabled}
-                            style="position:absolute; left:10px; right:10px; bottom:10px; height:26px; font-size:12px; border-radius:8px; border:1px solid #30363d; background:#1c2128; color:#fff;"
-                            onclick={onclick_cb}
-                        >
-                            { btn_label }
-                        </button>
-                        <div style="position:absolute; left:0; bottom:0; height:6px; width:100%; background:#161b22; border-radius:0 0 14px 14px; overflow:hidden;">
-                            <div style={format!("height:100%; width:{:.1}%; background:#3fb950;", bar)}></div>
-                        </div>
-                    </div>
-                </div>
+            // Second pass ensure separation after compression
+            let mut last = items[0].1;
+            for i in 1..n {
+                if items[i].1 < last + min_sep_angle { items[i].1 = last + min_sep_angle; }
+                last = items[i].1;
             }
-        })
-        .collect();
-
-    let svg_w = 4000;
-    let svg_h = 4000;
-
-    let zoom_in_btn = {
-        let tree_zoom = tree_zoom.clone();
-        let tree_offset = tree_offset.clone();
-        let container_ref = container_ref.clone();
-        Callback::from(move |_| {
-            if let Some(el) = container_ref.cast::<web_sys::HtmlElement>() {
-                let rect = el.get_bounding_client_rect();
-                let cx = rect.width() / 2.0;
-                let cy = rect.height() / 2.0;
-                let old = *tree_zoom;
-                let new = (old * 1.25).clamp(0.25, 3.0);
-                let (ox, oy) = *tree_offset;
-                let wx = (cx - ox) / old;
-                let wy = (cy - oy) / old;
-                tree_offset.set((cx - wx * new, cy - wy * new));
-                tree_zoom.set(new);
-            }
-        })
-    };
-    let zoom_out_btn = {
-        let tree_zoom = tree_zoom.clone();
-        let tree_offset = tree_offset.clone();
-        let container_ref = container_ref.clone();
-        Callback::from(move |_| {
-            if let Some(el) = container_ref.cast::<web_sys::HtmlElement>() {
-                let rect = el.get_bounding_client_rect();
-                let cx = rect.width() / 2.0;
-                let cy = rect.height() / 2.0;
-                let old = *tree_zoom;
-                let new = (old * 0.8).clamp(0.25, 3.0);
-                let (ox, oy) = *tree_offset;
-                let wx = (cx - ox) / old;
-                let wy = (cy - oy) / old;
-                tree_offset.set((cx - wx * new, cy - wy * new));
-                tree_zoom.set(new);
-            }
-        })
-    };
-    let center_btn = {
-        let tree_offset = tree_offset.clone();
-        let tree_zoom = tree_zoom.clone();
-        let container_ref = container_ref.clone();
-        let layouts_clone = layouts.clone();
-        Callback::from(move |_| {
-            if let Some(el) = container_ref.cast::<web_sys::HtmlElement>() {
-                let rect = el.get_bounding_client_rect(); // center on root node
-                if let Some(root_layout) = layouts_clone.iter().find(|l| l.id == root) {
-                    let zoom = *tree_zoom;
-                    let root_cx = root_layout.x + node_w * 0.5;
-                    let root_cy = root_layout.y + node_h * 0.5;
-                    let new_ox = rect.width() / 2.0 - root_cx * zoom;
-                    let new_oy = rect.height() / 2.0 - root_cy * zoom;
-                    tree_offset.set((new_ox, new_oy));
+            // Wrap again if exceeded
+            if items[n - 1].1 >= std::f64::consts::TAU {
+                let excess = items[n - 1].1 - std::f64::consts::TAU + min_sep_angle;
+                for (i, (_, a)) in items.iter_mut().enumerate() {
+                    let t = i as f64 / ((n - 1).max(1) as f64);
+                    *a -= excess * t;
                 }
             }
-        })
-    };
-
-    // Prevent dragging when pressing inside control panels
-    let stop_mouse_down = Callback::from(|e: yew::events::MouseEvent| {
-        e.stop_propagation();
-    });
-
-    // Reset button callback (open modal)
-    let open_reset = {
-        let show_reset_confirm = show_reset_confirm.clone();
-        Callback::from(move |_| show_reset_confirm.set(true))
-    };
-    // Cancel reset
-    let cancel_reset = {
-        let show_reset_confirm = show_reset_confirm.clone();
-        Callback::from(move |_| show_reset_confirm.set(false))
-    };
-    // Confirm reset logic
-    let confirm_reset = {
-        let show_reset_confirm = show_reset_confirm.clone();
-        let upgrade_state_handle = props.upgrade_state.clone();
-        let run_state_handle = props.run_state.clone();
-        Callback::from(move |_| {
-            // Clear relevant localStorage keys
-            if let Some(win) = web_sys::window() {
-                if let Ok(Some(store)) = win.local_storage() {
-                    let _ = store.remove_item("md_upgrade_state");
-                    let _ = store.remove_item("md_research");
-                    let _ = store.remove_item("md_intro_seen"); // also reset intro/help
+            // Local swap optimization (reduce total parent edge length)
+            let cost = |id: UpgradeId, ang: f64| -> f64 {
+                if let Some(ps) = parents.get(&id) {
+                    let mut c = 0.0;
+                    for pid in ps {
+                        if let Some(&(px, py)) = pos.get(pid) {
+                            let dx = ang.cos() * r - px;
+                            let dy = ang.sin() * r - py;
+                            c += dx * dx + dy * dy;
+                        }
+                    }
+                    c
+                } else { 0.0 }
+            };
+            let mut improved = true;
+            let mut passes = 0;
+            while improved && passes < 4 {
+                improved = false;
+                passes += 1;
+                for i in 0..n.saturating_sub(1) {
+                    let (id_a, ang_a) = items[i];
+                    let (id_b, ang_b) = items[i + 1];
+                    let before = cost(id_a, ang_a) + cost(id_b, ang_b);
+                    let after = cost(id_a, ang_b) + cost(id_b, ang_a);
+                    if after + 1e-6 < before {
+                        items[i].1 = ang_b;
+                        items[i + 1].1 = ang_a;
+                        improved = true;
+                    }
                 }
             }
-            // Reset upgrade state (preserve custom initial values as in App)
-            let new_ups = UpgradeState {
-                tower_refund_rate_percent: 100,
-                ..Default::default()
-            };
-            // (If future: ensure any always-on baseline adjustments here)
-            upgrade_state_handle.set(new_ups.clone());
-            // Reset research in run_state
-            run_state_handle.dispatch(RunAction::SetResearch { amount: 0 });
-            // Apply fresh upgrades to run state so it reflects base modifiers
-            run_state_handle.dispatch(RunAction::ApplyUpgrades { ups: new_ups });
-            show_reset_confirm.set(false);
-        })
-    };
-
-    // Confirmation modal HTML
-    let reset_modal = if *show_reset_confirm {
-        html! {
-            <div style="position:absolute; inset:0; background:rgba(0,0,0,0.55); backdrop-filter:blur(2px); display:flex; align-items:center; justify-content:center; z-index:200;">
-                <div style="width:360px; max-width:90%; background:#161b22; border:1px solid #30363d; border-radius:12px; padding:18px 20px 16px 20px; display:flex; flex-direction:column; gap:14px;" onmousedown={stop_mouse_down.clone()}>
-                    <div style="font-size:16px; font-weight:600;">{"Reset Progress"}</div>
-                    <div style="font-size:13px; line-height:1.4; opacity:0.85;">
-                        {"This will erase all upgrades, research points, and show the intro again. This cannot be undone. Are you sure you want to reset?"}
-                    </div>
-                    <div style="display:flex; gap:10px; justify-content:flex-end;">
-                        <button onclick={cancel_reset.clone()} style="min-width:90px;">{"Cancel"}</button>
-                        <button onclick={confirm_reset} style="min-width:110px; background:#b62324; border:1px solid #da3633;">{"Confirm Reset"}</button>
-                    </div>
-                </div>
-            </div>
+            // Commit positions
+            for (id, ang) in items { pos.insert(id, (r * ang.cos(), r * ang.sin())); }
         }
-    } else {
-        html! {}
+    }
+
+    // --- SVG edges (lines to prerequisites) ---
+    let hovered_opt = *hover_id; // capture early
+    // Build ancestor set (full chain to root) & descendant set (full subtree) for hovered node
+    let mut ancestor_set: HashSet<UpgradeId> = HashSet::new();
+    let mut descendant_set: HashSet<UpgradeId> = HashSet::new();
+    if let Some(h) = hovered_opt {
+        // ancestors (including self)
+        ancestor_set.insert(h);
+        let mut stack = vec![h];
+        while let Some(cur) = stack.pop() {
+            if let Some(ps) = parents.get(&cur) {
+                for pid in ps { if ancestor_set.insert(*pid) { stack.push(*pid); } }
+            }
+        }
+        // descendants (excluding self at first then add later if needed)
+        let mut dstack = vec![h];
+        while let Some(cur) = dstack.pop() {
+            if let Some(cs) = children.get(&cur) {
+                for cid in cs { if descendant_set.insert(*cid) { dstack.push(*cid); } }
+            }
+        }
+        descendant_set.insert(h); // unify logic (hovered part of both for mixed edge coloring simplicity)
+    }
+    let chain_set: HashSet<UpgradeId> = if hovered_opt.is_some() {
+        ancestor_set.union(&descendant_set).copied().collect()
+    } else { HashSet::new() };
+    let mut edge_svg: Vec<Html> = Vec::new();
+    for def in UPGRADE_DEFS {
+        if !visible_ids.contains(&def.id) { continue; } // hide edges for hidden future nodes
+        if let Some(&(x2, y2)) = pos.get(&def.id) {
+            for p in def.prerequisites {
+                if let Some(&(x1, y1)) = pos.get(&p.id) {
+                    // parent should always be visible if child is visible (prereqs met), but guard anyway
+                    if !visible_ids.contains(&p.id) { continue; }
+                    let locked = !ups.is_unlocked(def.id);
+                    let parent_len = (x1 * x1 + y1 * y1).sqrt();
+                    let child_len = (x2 * x2 + y2 * y2).sqrt();
+                    let a1 = y1.atan2(x1);
+                    let a2 = y2.atan2(x2);
+                    let ac = (a1 + a2) * 0.5;
+                    let rc = (parent_len + child_len) * 0.5 + 40.0;
+                    let cx = rc * ac.cos();
+                    let cy = rc * ac.sin();
+                    let both_in = chain_set.contains(&def.id) && chain_set.contains(&p.id);
+                    let ancestor_edge = both_in && ancestor_set.contains(&def.id) && ancestor_set.contains(&p.id);
+                    let descendant_edge = both_in && descendant_set.contains(&def.id) && descendant_set.contains(&p.id) && !ancestor_edge;
+                    let stroke = if both_in {
+                        if ancestor_edge { if locked { "#555" } else { "#58a6ff" } } else if descendant_edge { if locked { "#3a5c3a" } else { "#2ea043" } } else { if locked { "#555" } else { "#58a6ff" } }
+                    } else if locked { "#262b31" } else { "#30363d" };
+                    let width = if both_in { if ancestor_edge { 5 } else if descendant_edge { 4 } else { 5 } } else { 3 };
+                    let opacity = if hovered_opt.is_some() && !both_in { 0.12 } else { 1.0 };
+                    edge_svg.push(html! {
+                        <path d={format!("M{:.1},{:.1} Q{:.1},{:.1} {:.1},{:.1}", x1, y1, cx, cy, x2, y2)}
+                              stroke={stroke}
+                              stroke-width={width.to_string()}
+                              stroke-linecap="round"
+                              fill="none"
+                              opacity={format!("{:.2}", opacity)} />
+                    });
+                }
+            }
+        }
+    }
+
+    // --- Node HTML ---
+    let mut node_html: Vec<Html> = Vec::new();
+    let purchase_cb = props.purchase.clone();
+    for def in UPGRADE_DEFS {
+        if !visible_ids.contains(&def.id) { continue; }
+        if let Some(&(x, y)) = pos.get(&def.id) {
+            let lvl = ups.level(def.id);
+            let max = def.max_level;
+            let cost = ups.next_cost(def.id);
+            let unlocked = ups.is_unlocked(def.id);
+            let affordable = cost.map(|c| c <= research).unwrap_or(false);
+            let can_buy = unlocked && affordable && lvl < max;
+            let base_dim = if !unlocked { 0.30 } else if can_buy { 1.0 } else { 0.75 };
+            let is_hovered = Some(def.id) == hovered_opt;
+            let is_ancestor = ancestor_set.contains(&def.id) && !is_hovered;
+            let is_descendant = descendant_set.contains(&def.id) && !is_hovered && !is_ancestor;
+            let in_chain = is_hovered || is_ancestor || is_descendant;
+            let dim = if hovered_opt.is_some() && !in_chain { base_dim * 0.18 } else if is_hovered { 1.0 } else { base_dim };
+            let is_max = lvl >= max;
+            let symbol = if def.id == UpgradeId::TowerDamage1 { "★" } else { cat_symbol(def.category) };
+            let border = if is_hovered { "#58a6ff" } else if is_ancestor { "#3c6fa3" } else if is_descendant { "#2ea043" } else if is_max { "#d29922" } else if can_buy { "#2ea043" } else { "#30363d" };
+            let bg = if is_hovered { "#1b2733" } else if is_ancestor { "#15222e" } else if is_descendant { "#142818" } else if can_buy { "#1d2b1d" } else { "#111821" };
+            let glow = if is_hovered { "0 0 14px #58a6ff" } else if is_ancestor { "0 0 9px #244a68" } else if is_descendant { "0 0 9px #245b2e" } else if can_buy { "0 0 10px #2ea043" } else { "none" };
+            let size = if is_hovered { 56.0 } else { 48.0 };
+            let ring = depths.get(&def.id).copied().unwrap_or(0);
+            let mut tip = format!(
+                "{}\nCategory: {}\nEffect: {}\nLevel: {}/{}",
+                def.id.key(), def.category, def.effect_per_level, lvl, max
+            );
+            if def.id == UpgradeId::PlayAreaSize {
+                let cur_sz = play_area_size_for_level(lvl as u8);
+                tip.push_str(&format!("\nCurrent size: {0}x{0}", cur_sz));
+                if lvl < max {
+                    let next_sz = play_area_size_for_level(lvl as u8 + 1);
+                    tip.push_str(&format!("\nNext size: {0}x{0}", next_sz));
+                } else {
+                    tip.push_str("\nMax size reached");
+                }
+            }
+            if let Some(c) = cost { if lvl < max { tip.push_str(&format!("\nCost: {} RP", c)); } } else { tip.push_str("\nMaxed"); }
+            if !def.prerequisites.is_empty() {
+                tip.push_str("\nPrerequisites:");
+                for p in def.prerequisites { tip.push_str(&format!("\n- {} {} (you:{})", p.id.key(), p.level, ups.level(p.id))); }
+            }
+            let hid = hover_id.clone();
+            let idc = def.id;
+            let on_enter = Callback::from(move |_| hid.set(Some(idc)));
+            let hid2 = hover_id.clone();
+            let on_leave = Callback::from(move |_| hid2.set(None));
+            let purchase2 = purchase_cb.clone();
+            let onclick = Callback::from(move |_| purchase2.emit(idc));
+            node_html.push(html! {
+                <div key={def.id.key()}
+                     onmouseenter={on_enter}
+                     onmouseleave={on_leave}
+                     onclick={onclick}
+                     aria-label={tip.clone()}
+                     style={format!("position:absolute; left:{:.1}px; top:{:.1}px; width:{:.1}px; height:{:.1}px; margin-left:-{:.1}px; margin-top:-{:.1}px; display:flex; align-items:center; justify-content:center; font-size:{:.0}px; cursor:pointer; user-select:none; border:3px solid {}; background:{}; color:#fff; border-radius:50%; opacity:{:.2}; box-shadow:{}; transition:all 120ms ease;",
+                                    x, y, size, size, size / 2.0, size / 2.0, if is_hovered { 26.0 } else { 22.0 }, border, bg, dim, glow)}
+                >
+                    { symbol }
+                    <div style="position:absolute; bottom:-4px; right:-4px; font-size:11px; background:#161b22; padding:2px 4px; border-radius:6px; border:1px solid #30363d;">
+                        { format!("{}/{}", lvl, max) }
+                    </div>
+                    { if ring == 0 { html!{
+                        <div style="position:absolute; top:-6px; left:-6px; font-size:10px; background:#2e3138; padding:2px 4px; border-radius:6px; border:1px solid #30363d;">{"ROOT"}</div>
+                    }} else { html!{} } }
+                </div>
+            });
+        }
+    }
+
+    // --- Tooltip overlay (independent to avoid layout shifts) ---
+    let tooltip = if let Some(hid) = *hover_id {
+        if let Some(def) = UPGRADE_DEFS.iter().find(|d| d.id == hid) {
+            if let Some((x, y)) = pos.get(&hid) {
+                let lvl = ups.level(hid);
+                let max = def.max_level;
+                let cost = ups.next_cost(hid);
+                let unlocked = ups.is_unlocked(hid);
+                let affordable = cost.map(|c| c <= research).unwrap_or(false);
+                let mut lines = vec![
+                    format!("{}", def.id.key()),
+                    format!("Category: {}", def.category),
+                    format!("Effect: {}", def.effect_per_level),
+                    format!("Level: {}/{}", lvl, max),
+                ];
+                if let Some(c) = cost { if lvl < max { lines.push(format!("Cost: {} RP", c)); } } else { lines.push("Maxed".into()); }
+                if !def.prerequisites.is_empty() {
+                    lines.push("Prereqs:".into());
+                    for p in def.prerequisites { lines.push(format!("- {} {} (you:{})", p.id.key(), p.level, ups.level(p.id))); }
+                }
+                if !unlocked { lines.push("LOCKED".into()); } else if lvl < max && !affordable { lines.push("Need more RP".into()); }
+                if def.id == UpgradeId::PlayAreaSize {
+                    let cur_sz = play_area_size_for_level(lvl as u8);
+                    lines.push(format!("Current size: {0}x{0}", cur_sz));
+                    if lvl < max { let next_sz = play_area_size_for_level(lvl as u8 + 1); lines.push(format!("Next size: {0}x{0}", next_sz)); } else { lines.push("Max size reached".into()); }
+                }
+                let content = lines.join("\n");
+                html! { <div style={format!("position:absolute; left:{:.1}px; top:{:.1}px; transform:translate(14px,-14px); background:#161b22; border:1px solid #30363d; padding:8px 10px; white-space:pre; font-size:12px; line-height:1.2; border-radius:8px; max-width:240px; pointer-events:none; z-index:50;", x, y)}>{ content }</div> }
+            } else { html! {} }
+        } else { html! {} }
+    } else { html! {} };
+
+    // --- Respec (refund all invested research points back to pool) ---
+    let respec_cb = {
+        let run_state = props.run_state.clone();
+        let upgrade_state = props.upgrade_state.clone();
+        Callback::from(move |_| {
+            let current = (*upgrade_state).clone();
+            let refund = current.total_spent();
+            let mut new_ups = UpgradeState { tower_refund_rate_percent: current.tower_refund_rate_percent, ..Default::default() };
+            // preserve any future meta fields if added (only tower_refund_rate_percent now)
+            upgrade_state.set(new_ups.clone());
+            let new_amount = run_state.currencies.research.saturating_add(refund);
+            run_state.dispatch(RunAction::SetResearch { amount: new_amount });
+            run_state.dispatch(RunAction::ApplyUpgrades { ups: new_ups });
+        })
     };
+
+    // --- Interaction handlers ---
+    let mousedown = {
+        let dragging = dragging.clone();
+        let drag_last = drag_last.clone();
+        Callback::from(move |e: yew::events::MouseEvent| {
+            dragging.set(true);
+            drag_last.set((e.client_x() as f64, e.client_y() as f64));
+        })
+    };
+    let mouseup = { let dragging = dragging.clone(); Callback::from(move |_| dragging.set(false)) };
+    let mousemove = {
+        let dragging = dragging.clone();
+        let drag_last = drag_last.clone();
+        let offset = offset.clone();
+        Callback::from(move |e: yew::events::MouseEvent| {
+            if *dragging {
+                let (lx, ly) = *drag_last;
+                let nx = e.client_x() as f64;
+                let ny = e.client_y() as f64;
+                let dx = nx - lx;
+                let dy = ny - ly;
+                drag_last.set((nx, ny));
+                let (ox, oy) = *offset;
+                // With transform scale(s) translate(ox,oy), translation is post-scale (screen pixels)
+                offset.set((ox + dx, oy + dy));
+            }
+        })
+    };
+    let wheel_cb = {
+        let zoom = zoom.clone();
+        let offset = offset.clone();
+        let container_ref = container_ref.clone();
+        Callback::from(move |e: yew::events::WheelEvent| {
+            e.prevent_default();
+            e.stop_propagation();
+            let old_zoom = *zoom;
+            if let Some(el) = container_ref.cast::<web_sys::Element>() {
+                let rect = el.get_bounding_client_rect();
+                let mut dy = e.delta_y();
+                // Normalize delta based on deltaMode (0=pixel,1=line,2=page)
+                match e.delta_mode() { 1 => dy *= 16.0, 2 => dy *= rect.height(), _ => {} }
+                let factor = (-dy * 0.001).exp();
+                let new_zoom = (old_zoom * factor).clamp(0.3, 3.5);
+                if (new_zoom - old_zoom).abs() < 1e-6 { return; }
+                let bx = e.client_x() as f64 - rect.left();
+                let by = e.client_y() as f64 - rect.top();
+                let (ox, oy) = *offset;
+                // Transform: scale(s) translate(ox,oy) => screen = world*s + (ox,oy)
+                let world_x = (bx - ox) / old_zoom;
+                let world_y = (by - oy) / old_zoom;
+                let new_ox = bx - world_x * new_zoom;
+                let new_oy = by - world_y * new_zoom;
+                offset.set((new_ox, new_oy));
+                zoom.set(new_zoom);
+            }
+        })
+    };
+
+    let stop_mouse_down = Callback::from(|e: yew::events::MouseEvent| e.stop_propagation());
+
+    // Recenter (Origin): root world (0,0) -> screen = offset, so set offset to viewport center
+    let recenter_root = {
+        let offset = offset.clone();
+        let container_ref = container_ref.clone();
+        Callback::from(move |_| {
+            if let Some(el) = container_ref.cast::<web_sys::Element>() {
+                let rect = el.get_bounding_client_rect();
+                offset.set((rect.width()/2.0, rect.height()/2.0));
+            } else { offset.set((0.0,0.0)); }
+        })
+    };
+
+    // --- Viewport / transform ---
+    let (ox, oy) = *offset;
+    let scale = *zoom;
+    let svg_edges = html! {<svg style="position:absolute; inset:0; overflow:visible; pointer-events:none;" width="100%" height="100%">{ for edge_svg }</svg>};
 
     html! {
-        <div style="position:relative; width:100vw; height:100vh; background:#0d1117; overflow:hidden;" ref={container_ref} onwheel={wheel_tree} onmousedown={mousedown_tree} onmousemove={mousemove_tree} onmouseup={mouseup_tree.clone()} onmouseleave={mouseup_tree}>
-            <div style="position:absolute; top:12px; right:12px; background:rgba(22,27,34,0.95); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:180px; display:flex; flex-direction:column; gap:6px; z-index:20;" onmousedown={stop_mouse_down.clone()}>
-                <div style="font-weight:600;">{ format!("Research: {}", research) }</div>
-                <button onclick={{ let cb=props.to_run.clone(); Callback::from(move |_| cb.emit(())) }}>{"Back"}</button>
-                <button onclick={open_reset} style="background:#3b1d1d; border:1px solid #5d2d2d;">{"Reset Progress"}</button>
-            </div>
-            <div style="position:absolute; left:12px; bottom:12px; background:rgba(22,27,34,0.95); border:1px solid #30363d; border-radius:8px; padding:8px; display:flex; gap:6px; align-items:center; z-index:20;" onmousedown={stop_mouse_down}>
-                <button onclick={zoom_out_btn}> {"-"} </button>
-                <button onclick={zoom_in_btn}> {"+"} </button>
-                <span style="width:8px;"></span>
-                <button onclick={center_btn}> {"Center"} </button>
-            </div>
-            <div style={format!("position:absolute; inset:0; cursor:{}; z-index:0;", if *dragging {"grabbing"} else {"grab"})}>
-                <div style={transform}>
-                    <svg style="position:absolute; inset:0; overflow:visible; pointer-events:none;" width={svg_w.to_string()} height={svg_h.to_string()}><defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#374151" /></marker></defs>{ for edge_paths }</svg>
-                    { for nodes_html }
+        <div ref={container_ref}
+             style="position:relative; width:100vw; height:100vh; background:#0d1117; overflow:hidden; overscroll-behavior:contain; touch-action:none;"
+             onwheel={wheel_cb}
+             onmousedown={mousedown}
+             onmousemove={mousemove}
+             onmouseup={mouseup.clone()}
+             onmouseleave={mouseup}
+        >
+            <div style="position:absolute; top:12px; right:12px; background:#161b22dd; border:1px solid #30363d; border-radius:8px; padding:8px; display:flex; flex-direction:column; gap:6px; z-index:20;" onmousedown={stop_mouse_down.clone()}>
+                <div style="font-weight:600; font-size:14px;">{ format!("Research: {}", research) }</div>
+                <div style="display:flex; gap:6px;">
+                    <button onclick={{ let cb=props.to_run.clone(); Callback::from(move |_| cb.emit(())) }}> {"Back"} </button>
+                    <button onclick={respec_cb} style="background:#1b2733; border:1px solid #244a68;">{"Respec"}</button>
+                </div>
+                <div style="display:flex; gap:4px;">
+                    <button onclick={recenter_root.clone()}> {"Origin"} </button>
+                    <button onclick={{ let zoom=zoom.clone(); Callback::from(move |_| zoom.set((*zoom*1.25).clamp(0.3,3.5))) }}> {"+"} </button>
+                    <button onclick={{ let zoom=zoom.clone(); Callback::from(move |_| zoom.set((*zoom*0.8).clamp(0.3,3.5))) }}> {"-"} </button>
                 </div>
             </div>
-            { reset_modal }
+            <div style={format!("position:absolute; inset:0; cursor:{};", if *dragging {"grabbing"} else {"grab"})}></div>
+            <div style={format!("position:absolute; inset:0; transform:translate({}px, {}px) scale({}); transform-origin:0 0;", ox, oy, scale)}>
+                { svg_edges }
+                { for node_html }
+                { tooltip }
+            </div>
+            { html!{} }
         </div>
     }
 }

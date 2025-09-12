@@ -13,6 +13,7 @@ use super::{
     camera_controls::CameraControls, controls_panel::ControlsPanel,
     game_over_overlay::GameOverOverlay, intro_overlay::IntroOverlay, legend_panel::LegendPanel,
     settings_modal::SettingsModal, stats_panel::StatsPanel, time_display::TimeDisplay,
+    secondary_stats_panel::SecondaryStatsPanel, tower_panel::TowerPanel,
 };
 
 #[derive(Properties, PartialEq, Clone)]
@@ -20,6 +21,7 @@ pub struct RunViewProps {
     pub run_state: UseReducerHandle<RunState>,
     pub to_upgrades: Callback<()>,
     pub restart_run: Callback<()>,
+    pub hard_reset: Callback<()>,
 }
 
 #[function_component(RunView)]
@@ -51,6 +53,17 @@ pub fn run_view(props: &RunViewProps) -> Html {
         true // default ON
     });
     let show_damage_numbers_flag = use_mut_ref(|| true);
+    // new: show secondary stats setting
+    let show_secondary_stats = use_state(|| {
+        if let Some(win) = web_sys::window() {
+            if let Ok(Some(store)) = win.local_storage() {
+                if let Ok(Some(v)) = store.get_item("md_setting_show_secondary_stats") {
+                    return v == "1" || v == "true";
+                }
+            }
+        }
+        true
+    });
     let open_settings = use_state(|| false);
     let touch_state = use_mut_ref(|| TouchState::default());
     let tower_feedback = use_state(|| String::new());
@@ -107,8 +120,21 @@ pub fn run_view(props: &RunViewProps) -> Html {
                     );
                 }
             }
-            if let Some(f) = &*draw_ref.borrow() {
-                f();
+            if let Some(f) = &*draw_ref.borrow() { f(); }
+            || ()
+        });
+    }
+    // Effect: toggle secondary stats persistence
+    {
+        let flag = *show_secondary_stats;
+        use_effect_with(flag, move |_| {
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(store)) = win.local_storage() {
+                    let _ = store.set_item(
+                        "md_setting_show_secondary_stats",
+                        if flag { "1" } else { "0" },
+                    );
+                }
             }
             || ()
         });
@@ -408,12 +434,11 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         ctx.set_font(&format!("{}px sans-serif", (0.2 / scale_px).max(0.5))); // 10% of prior 6.0 baseline
                         ctx.set_text_align("center");
                         for dn in &rs.damage_numbers {
-                            let life_ratio = (dn.ttl / 0.8).clamp(0.0, 1.0);
-                            let rise = (0.8 - dn.ttl).max(0.0) * 0.30; // slightly reduced rise for very small text
+                            let life_ratio = (dn.ttl / 0.8_f64).clamp(0.0, 1.0);
+                            let rise = (0.8_f64 - dn.ttl).max(0.0_f64) * 0.30_f64;
                             let alpha = life_ratio;
-                            ctx.set_fill_style_str(&format!("rgba(255,50,50,{:.3})", alpha)); // red color
-                            ctx.fill_text(&dn.amount.to_string(), dn.x, dn.y - rise)
-                                .ok();
+                            ctx.set_fill_style_str(&format!("rgba(255,50,50,{:.3})", alpha));
+                            ctx.fill_text(&dn.amount.to_string(), dn.x, dn.y - rise).ok();
                         }
                         ctx.set_text_align("start");
                     }
@@ -1652,6 +1677,10 @@ pub fn run_view(props: &RunViewProps) -> Html {
         let show_damage_numbers = show_damage_numbers.clone();
         Callback::from(move |()| show_damage_numbers.set(!*show_damage_numbers))
     };
+    let toggle_secondary_stats_cb: Callback<()> = {
+        let show_secondary_stats = show_secondary_stats.clone();
+        Callback::from(move |()| show_secondary_stats.set(!*show_secondary_stats))
+    };
     let open_settings_cb: Callback<()> = {
         let open_settings = open_settings.clone();
         Callback::from(move |()| open_settings.set(true))
@@ -1664,6 +1693,11 @@ pub fn run_view(props: &RunViewProps) -> Html {
     let restart_cb_unit: Callback<()> = {
         let restart = props.restart_run.clone();
         Callback::from(move |()| restart.emit(()))
+    };
+    let hard_reset_cb_unit: Callback<()> = {
+        let hard = props.hard_reset.clone();
+        let open_settings = open_settings.clone();
+        Callback::from(move |()| { hard.emit(()); open_settings.set(false); })
     };
     let to_upgrades_unit: Callback<()> = {
         let cb = props.to_upgrades.clone();
@@ -1736,10 +1770,12 @@ pub fn run_view(props: &RunViewProps) -> Html {
 
     html! {<div style="position:relative; width:100vw; height:100vh;">
         <canvas ref={canvas_ref.clone()} id="game-canvas" style="display:block; width:100%; height:100%;"></canvas>
-        <TimeDisplay time_survived={time_ov} />
+        <TimeDisplay time_survived={time_ov} pause_label={pause_label_rv.to_string()} on_toggle_pause={toggle_pause_cb.clone()} />
         <IntroOverlay show={*show_intro} game_over={game_over} hide_intro={hide_intro_cb} to_upgrades={to_upgrades_unit.clone()} />
-        <StatsPanel gold={gold_ov} life={life_ov} research={research_ov} run_id={rs_overlay.run_id} enemy_count={enemy_count} path_len={path_len} path_nodes_text={path_nodes_text_opt} />
-        <ControlsPanel pause_label={pause_label_rv.to_string()} on_toggle_pause={toggle_pause_cb} to_upgrades={to_upgrades_unit.clone()} tower_feedback={tower_feedback_opt} on_show_help={show_help_cb} on_open_settings={open_settings_cb} />
+        <StatsPanel gold={gold_ov} life={life_ov} research={research_ov} />
+        <SecondaryStatsPanel run_id={rs_overlay.run_id} enemy_count={enemy_count} path_len={path_len} path_nodes_text={path_nodes_text_opt} show={*show_secondary_stats} />
+        <TowerPanel tower_feedback={tower_feedback_opt} />
+        <ControlsPanel to_upgrades={to_upgrades_unit.clone()} on_show_help={show_help_cb} on_open_settings={open_settings_cb} />
         <CameraControls on_zoom_in={zoom_in_cb} on_zoom_out={zoom_out_cb} on_pan_left={pan_cb(-64.0,0.0)} on_pan_right={pan_cb(64.0,0.0)} on_pan_up={pan_cb(0.0,-64.0)} on_pan_down={pan_cb(0.0,64.0)} on_center={center_cb} />
         <LegendPanel has_start={has_start} has_entrance={has_entrance} has_exit={has_exit} has_indestructible={has_indestructible} has_basic={has_basic} has_gold={has_gold} has_empty={has_empty} has_wall={has_wall}
             hover_text={hover_text}
@@ -1752,7 +1788,17 @@ pub fn run_view(props: &RunViewProps) -> Html {
             highlight_empty={hl_empty}
             highlight_wall={hl_wall}
         />
-        <SettingsModal show={*open_settings} on_close={close_settings_cb.clone()} show_path={*show_path} on_toggle_path={toggle_path_cb} show_damage_numbers={*show_damage_numbers} on_toggle_damage_numbers={toggle_damage_numbers_cb} on_restart_run={restart_cb_unit.clone()} />
+        <SettingsModal
+            show={*open_settings}
+            on_close={close_settings_cb.clone()}
+            show_path={*show_path}
+            on_toggle_path={toggle_path_cb}
+            show_damage_numbers={*show_damage_numbers}
+            on_toggle_damage_numbers={toggle_damage_numbers_cb}
+            show_secondary_stats={*show_secondary_stats}
+            on_toggle_secondary_stats={toggle_secondary_stats_cb}
+            on_hard_reset={hard_reset_cb_unit.clone()}
+        />
         <GameOverOverlay show={game_over} time_survived={time_ov} loops_completed={rs_overlay.stats.loops_completed} blocks_mined={rs_overlay.stats.blocks_mined} restart={restart_cb_unit} to_upgrades={to_upgrades_unit} />
     </div> }
 }

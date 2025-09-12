@@ -10,4 +10,6 @@ pub mod settings_modal;
 pub mod stats_panel;
 pub mod time_display;
 pub mod upgrades_view;
+pub mod secondary_stats_panel;
+pub mod tower_panel;
 pub use app::App;

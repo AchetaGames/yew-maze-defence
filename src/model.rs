@@ -302,12 +302,13 @@ impl RunState {
             grid_size: gs,
             tiles,
             currencies: Currencies {
-                gold: 5,
+                gold: 2, // lowered starting gold (was 5)
                 ..Default::default()
             },
             stats: RunStats::default(),
-            life: 20,
-            mining_speed: 6.0,
+            life: 10, // lowered starting life (was 20)
+            // Slowed baseline mining speed (was 6.0); higher hardness now takes meaningfully longer
+            mining_speed: 1.0,
             started: false,
             is_paused: false,
             path: Vec::new(),
@@ -326,7 +327,7 @@ impl RunState {
             tower_cost: 2,
             projectiles: Vec::new(),
             run_id: 0,
-            life_max: 20,
+            life_max: 10, // lowered base life max
             life_regen_per_sec: 0.0,
             life_regen_accum: 0.0,
             tower_fire_rate_global: 1.0,
@@ -629,6 +630,8 @@ pub enum UpgradeId {
     BoostHealingPower,
     BoostHealingRadius,
     BoostHealingShield,
+    // New meta progression upgrade for expanding grid
+    PlayAreaSize,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prereq {
@@ -743,7 +746,8 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 5,
         base_cost: 10,
         cost_multiplier: 1.5,
-        effect_per_level: "+10% mining speed",
+        // Adjusted from +10% to +8% to keep overall progression slower after baseline nerf
+        effect_per_level: "+8% mining speed",
         prerequisites: prereqs!(TowerDamage1:1),
     },
     UpgradeDef {
@@ -935,7 +939,19 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         effect_per_level: "5% shield on heal (todo)",
         prerequisites: prereqs!(BoostHealingPower:5),
     },
+    UpgradeDef {
+        id: UpgradeId::PlayAreaSize,
+        category: "PlayArea",
+        max_level: 19, // 0..19 -> 20 sizes
+        base_cost: 30,
+        cost_multiplier: 1.4,
+        effect_per_level: "Expand play area size",
+        prerequisites: prereqs!(TowerDamage1:1),
+    },
 ];
+// Progression of square grid sizes for PlayAreaSize levels 0..=19
+pub const PLAY_AREA_SIZES: &[u32] = &[10,14,18,24,32,40,52,64,80,96,112,128,144,160,176,192,208,224,240,255];
+pub fn play_area_size_for_level(level: u8) -> u32 { let i = level as usize; if i >= PLAY_AREA_SIZES.len() { *PLAY_AREA_SIZES.last().unwrap() } else { PLAY_AREA_SIZES[i] } }
 impl UpgradeId {
     pub fn key(self) -> &'static str {
         match self {
@@ -971,6 +987,7 @@ impl UpgradeId {
             UpgradeId::BoostHealingPower => "BoostHealingPower",
             UpgradeId::BoostHealingRadius => "BoostHealingRadius",
             UpgradeId::BoostHealingShield => "BoostHealingShield",
+            UpgradeId::PlayAreaSize => "PlayAreaSize",
         }
     }
 }
@@ -1023,11 +1040,23 @@ impl UpgradeState {
             self.levels.insert(id.key().into(), c + 1);
         }
     }
+    pub fn total_spent(&self) -> u64 {
+        let mut sum = 0u64;
+        for def in UPGRADE_DEFS {
+            let lvl = self.level(def.id) as i32;
+            if lvl <= 0 { continue; }
+            for i in 0..lvl {
+                let cost = (def.base_cost as f64 * def.cost_multiplier.powi(i)).round() as u64;
+                sum = sum.saturating_add(cost);
+            }
+        }
+        sum
+    }
 }
 pub fn apply_upgrades_to_run(run: &mut RunState, ups: &UpgradeState) {
     use UpgradeId::*;
     let l = |id: UpgradeId| ups.level(id) as f64;
-    run.mining_speed = 6.0 * (1.0 + 0.10 * l(MiningSpeed));
+    run.mining_speed = 2.0 * (1.0 + 0.08 * l(MiningSpeed));
     run.tower_base_damage = (2.0 * (1.0 + 0.12 * l(TowerDamage1))) as u32;
     run.tower_fire_rate_global = 1.0 + 0.08 * l(FireRate);
     run.crit_chance = 0.03 * l(CritChance);
@@ -1038,14 +1067,14 @@ pub fn apply_upgrades_to_run(run: &mut RunState, ups: &UpgradeState) {
     run.mining_gold_mul = 1.0 + 0.15 * l(GoldTileReward);
     run.mining_crit_chance = 0.05 * l(MiningCrit);
     if run.stats.time_survived_secs == 0 && !run.started {
-        run.life_max = 20 + 5 * ups.level(HealthStart) as u32;
+        run.life_max = 10 + 5 * ups.level(HealthStart) as u32; // base adjusted from 20 to 10
         run.life = run.life_max;
         run.currencies.gold = run
             .currencies
             .gold
             .saturating_add(10 * ups.level(StartingGold) as u64);
     }
-    run.life_max = 20 + 5 * ups.level(HealthStart) as u32;
+    run.life_max = 10 + 5 * ups.level(HealthStart) as u32; // base adjusted from 20 to 10
     if run.life > run.life_max {
         run.life = run.life_max;
     }
@@ -1084,7 +1113,8 @@ impl yew::Reducible for RunState {
         use RunAction::*;
         if let ResetRunWithUpgrades { ups } = &action {
             let prev_r = self.currencies.research;
-            let mut fresh = RunState::new_with_upgrades(self.grid_size, ups);
+            let size = play_area_size_for_level(ups.level(UpgradeId::PlayAreaSize));
+            let mut fresh = RunState::new_with_upgrades(GridSize { width: size, height: size }, ups);
             fresh.currencies.research = prev_r;
             fresh.run_id = self.run_id + 1;
             return Rc::new(fresh);

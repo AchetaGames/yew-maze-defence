@@ -1,5 +1,5 @@
 use super::{run_view::RunView, upgrades_view::UpgradesView};
-use crate::model::{GridSize, RunAction, RunState, UpgradeId, UpgradeState};
+use crate::model::{GridSize, RunAction, RunState, UpgradeId, UpgradeState, play_area_size_for_level};
 use yew::prelude::*;
 
 #[derive(PartialEq, Clone)]
@@ -19,15 +19,13 @@ pub struct UpgradeContext {
 pub fn app() -> Html {
     let view = use_state(|| View::Run);
     let run_state = use_reducer(|| {
-        RunState::new_basic(GridSize {
-            width: 25,
-            height: 25,
-        })
+        RunState::new_basic(GridSize { width: 10, height: 10 })
     });
     let upgrade_state = use_state(|| UpgradeState {
         tower_refund_rate_percent: 100,
         ..Default::default()
     });
+    let hard_reset_counter = use_state(|| 0u64);
 
     // Load persisted upgrade & research
     {
@@ -37,8 +35,11 @@ pub fn app() -> Html {
             if let Some(win) = web_sys::window() {
                 if let Ok(Some(store)) = win.local_storage() {
                     if let Ok(Some(raw)) = store.get_item("md_upgrade_state") {
-                        if let Ok(us) = serde_json::from_str(&raw) {
-                            upgrade_state.set(us);
+                        if let Ok(us) = serde_json::from_str::<UpgradeState>(&raw) {
+                            let play_level = us.level(UpgradeId::PlayAreaSize);
+                            upgrade_state.set(us.clone());
+                            // Immediately reset run with proper grid size for play area level
+                            run_state.dispatch(RunAction::ResetRunWithUpgrades { ups: us.clone() });
                         }
                     }
                     if let Ok(Some(rp)) = store.get_item("md_research") {
@@ -104,12 +105,15 @@ pub fn app() -> Html {
                 return;
             }
             if let Some(cost) = ups.next_cost(id) {
-                if run_state.currencies.research < cost {
-                    return;
-                }
+                if run_state.currencies.research < cost { return; }
                 ups.purchase(id);
                 run_state.dispatch(RunAction::SpendResearch { amount: cost });
-                run_state.dispatch(RunAction::ApplyUpgrades { ups: ups.clone() });
+                // If play area size changed, fully reset run to apply new grid dimensions
+                if id == UpgradeId::PlayAreaSize {
+                    run_state.dispatch(RunAction::ResetRunWithUpgrades { ups: ups.clone() });
+                } else {
+                    run_state.dispatch(RunAction::ApplyUpgrades { ups: ups.clone() });
+                }
                 upgrade_state.set(ups);
             }
         })
@@ -120,18 +124,44 @@ pub fn app() -> Html {
         purchase: purchase.clone(),
     };
 
+    let hard_reset_cb = {
+        let run_state = run_state.clone();
+        let upgrade_state = upgrade_state.clone();
+        let hard_reset_counter = hard_reset_counter.clone();
+        Callback::from(move |_| {
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(store)) = win.local_storage() {
+                    let _ = store.remove_item("md_upgrade_state");
+                    let _ = store.remove_item("md_research");
+                    let _ = store.remove_item("md_intro_seen");
+                    let _ = store.remove_item("md_setting_show_path");
+                    let _ = store.remove_item("md_setting_show_damage_numbers");
+                    let _ = store.remove_item("md_setting_show_secondary_stats");
+                }
+            }
+            let default_ups = UpgradeState { tower_refund_rate_percent: 100, ..Default::default() };
+            upgrade_state.set(default_ups.clone());
+            run_state.dispatch(RunAction::ResetRunWithUpgrades { ups: default_ups.clone() });
+            run_state.dispatch(RunAction::SetResearch { amount: 0 });
+            hard_reset_counter.set(*hard_reset_counter + 1);
+        })
+    };
+
     let content = match *view {
         View::Run => html! { <RunView
+            key={*hard_reset_counter}
             run_state={run_state.clone()}
             to_upgrades={to_upgrades.clone()}
             restart_run={{
                 let run_state = run_state.clone();
                 let upgrade_state = upgrade_state.clone();
                 Callback::from(move |_| {
-                    run_state.dispatch(RunAction::ResetRunWithUpgrades { ups: (*upgrade_state).clone() });
+                    // Fresh run keeping current grid size; upgrades re-applied after reset.
+                    run_state.dispatch(RunAction::ResetRun);
                     run_state.dispatch(RunAction::ApplyUpgrades { ups: (*upgrade_state).clone() });
                 })
             }}
+            hard_reset={hard_reset_cb.clone()}
         /> },
         View::Upgrades => html! { <UpgradesView
             run_state={run_state.clone()}
