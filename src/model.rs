@@ -132,7 +132,7 @@ pub struct RunState {
     pub loop_cum_lengths: Vec<f64>, // cumulative lengths per node (same length as path_loop)
     pub loop_total_length: f64,
     pub enemies: Vec<Enemy>,
-    pub last_enemy_spawn_time_secs: u64,
+    pub last_enemy_spawn_time_secs: f64,
     pub version: u64,
     pub game_over: bool,
     pub last_mined_idx: Option<usize>,
@@ -372,7 +372,7 @@ impl RunState {
             loop_cum_lengths: Vec::new(),
             loop_total_length: 0.0,
             enemies: Vec::new(),
-            last_enemy_spawn_time_secs: 0,
+            last_enemy_spawn_time_secs: 0.0,
             version: 0,
             game_over: false,
             last_mined_idx: None,
@@ -1563,17 +1563,15 @@ impl Reducible for RunState {
                         let _ = prev; // suppress unused warning if radius_scale logic removed later
                     }
                 }
-                // Enemy spawning (simplified): spawn every 3s based on time_survived_secs progression & loop length
+                // Enemy spawning (scaling): spawn interval decreases as time_survived_secs increases
                 {
-                    let spawn_interval = 3; // seconds
-                    if new
-                        .stats
-                        .time_survived_secs
-                        .saturating_sub(new.last_enemy_spawn_time_secs)
-                        as i64
-                        >= spawn_interval
-                        && !new.game_over
-                    {
+                    let t = new.stats.time_survived_secs as f64;
+                    let max_interval = 2.0;
+                    let min_interval = 0.5;
+                    let spawn_interval = (max_interval - t * 0.01).max(min_interval);
+                    let last_spawn = new.last_enemy_spawn_time_secs;
+                    let now = new.stats.time_survived_secs as f64;
+                    if (now - last_spawn) >= spawn_interval && !new.game_over {
                         // find start tile
                         let mut sx = 0u32;
                         let mut sy = 0u32;
@@ -1601,7 +1599,7 @@ impl Reducible for RunState {
                                 radius_scale: 1.0,
                                 loop_dist: 0.0,
                             });
-                            new.last_enemy_spawn_time_secs = new.stats.time_survived_secs;
+                            new.last_enemy_spawn_time_secs = now;
                         }
                     }
                 }
