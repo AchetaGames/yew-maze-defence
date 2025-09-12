@@ -1,4 +1,4 @@
-use crate::model::{RunState, UPGRADE_DEFS, UnlockCondition, UpgradeId, UpgradeState};
+use crate::model::{RunAction, RunState, UnlockCondition, UpgradeId, UpgradeState, UPGRADE_DEFS};
 use std::collections::{HashMap, HashSet, VecDeque};
 use yew::prelude::*;
 
@@ -18,6 +18,8 @@ pub fn upgrades_view(props: &UpgradesViewProps) -> Html {
     let dragging = use_state(|| false);
     let drag_last = use_state(|| (0.0_f64, 0.0_f64));
     let container_ref = use_node_ref();
+    // New: reset confirmation state
+    let show_reset_confirm = use_state(|| false);
 
     // Handlers
     let wheel_tree = {
@@ -160,6 +162,30 @@ pub fn upgrades_view(props: &UpgradesViewProps) -> Html {
         }
     }
     let layout_of = |id: UpgradeId| layouts.iter().find(|l| l.id == id).cloned();
+    // Auto-center on initial mount
+    {
+        let tree_offset = tree_offset.clone();
+        let tree_zoom = tree_zoom.clone();
+        let container_ref = container_ref.clone();
+        let layouts_clone = layouts.clone();
+        use_effect_with((), move |_| {
+            if let Some(el) = container_ref.cast::<web_sys::HtmlElement>() {
+                if let Some(root_layout) = layouts_clone
+                    .iter()
+                    .find(|l| l.id == UpgradeId::TowerDamage)
+                {
+                    let rect = el.get_bounding_client_rect();
+                    let zoom = *tree_zoom; // currently 1.0 default
+                    let root_cx = root_layout.x + 190.0 * 0.5; // node_w
+                    let root_cy = root_layout.y + 140.0 * 0.5; // node_h
+                    let new_ox = rect.width() / 2.0 - root_cx * zoom;
+                    let new_oy = rect.height() / 2.0 - root_cy * zoom;
+                    tree_offset.set((new_ox, new_oy));
+                }
+            }
+            || ()
+        });
+    }
     let edge_paths: Vec<Html> = edges.iter().filter_map(|(p,c)| { let pl=layout_of(*p)?; let cl=layout_of(*c)?; let x1=pl.x + node_w*0.5; let y1=pl.y + node_h; let x2=cl.x + node_w*0.5; let y2=cl.y; Some(html!{<line x1={format!("{:.1}",x1)} y1={format!("{:.1}", y1+4.0)} x2={format!("{:.1}",x2)} y2={format!("{:.1}", y2-4.0)} stroke="#374151" stroke-width="3" marker-end="url(#arrowhead)" />}) }).collect();
     let zoom = *tree_zoom;
     let (off_x, off_y) = *tree_offset;
@@ -237,10 +263,70 @@ pub fn upgrades_view(props: &UpgradesViewProps) -> Html {
         e.stop_propagation();
     });
 
+    // Reset button callback (open modal)
+    let open_reset = {
+        let show_reset_confirm = show_reset_confirm.clone();
+        Callback::from(move |_| show_reset_confirm.set(true))
+    };
+    // Cancel reset
+    let cancel_reset = {
+        let show_reset_confirm = show_reset_confirm.clone();
+        Callback::from(move |_| show_reset_confirm.set(false))
+    };
+    // Confirm reset logic
+    let confirm_reset = {
+        let show_reset_confirm = show_reset_confirm.clone();
+        let upgrade_state_handle = props.upgrade_state.clone();
+        let run_state_handle = props.run_state.clone();
+        Callback::from(move |_| {
+            // Clear relevant localStorage keys
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(store)) = win.local_storage() {
+                    let _ = store.remove_item("md_upgrade_state");
+                    let _ = store.remove_item("md_research");
+                    let _ = store.remove_item("md_intro_seen"); // also reset intro/help
+                }
+            }
+            // Reset upgrade state (preserve custom initial values as in App)
+            let new_ups = UpgradeState {
+                tower_refund_rate_percent: 100,
+                ..Default::default()
+            };
+            // (If future: ensure any always-on baseline adjustments here)
+            upgrade_state_handle.set(new_ups.clone());
+            // Reset research in run_state
+            run_state_handle.dispatch(RunAction::SetResearch { amount: 0 });
+            // Apply fresh upgrades to run state so it reflects base modifiers
+            run_state_handle.dispatch(RunAction::ApplyUpgrades { ups: new_ups });
+            show_reset_confirm.set(false);
+        })
+    };
+
+    // Confirmation modal HTML
+    let reset_modal = if *show_reset_confirm {
+        html! {
+            <div style="position:absolute; inset:0; background:rgba(0,0,0,0.55); backdrop-filter:blur(2px); display:flex; align-items:center; justify-content:center; z-index:200;">
+                <div style="width:360px; max-width:90%; background:#161b22; border:1px solid #30363d; border-radius:12px; padding:18px 20px 16px 20px; display:flex; flex-direction:column; gap:14px;" onmousedown={stop_mouse_down.clone()}>
+                    <div style="font-size:16px; font-weight:600;">{"Reset Progress"}</div>
+                    <div style="font-size:13px; line-height:1.4; opacity:0.85;">
+                        {"This will erase all upgrades, research points, and show the intro again. This cannot be undone. Are you sure you want to reset?"}
+                    </div>
+                    <div style="display:flex; gap:10px; justify-content:flex-end;">
+                        <button onclick={cancel_reset.clone()} style="min-width:90px;">{"Cancel"}</button>
+                        <button onclick={confirm_reset} style="min-width:110px; background:#b62324; border:1px solid #da3633;">{"Confirm Reset"}</button>
+                    </div>
+                </div>
+            </div>
+        }
+    } else {
+        html! {}
+    };
+
     html! { <div style="position:relative; width:100vw; height:100vh; background:#0d1117; overflow:hidden;" ref={container_ref} onwheel={wheel_tree} onmousedown={mousedown_tree} onmousemove={mousemove_tree} onmouseup={mouseup_tree.clone()} onmouseleave={mouseup_tree}>
-        <div style="position:absolute; top:12px; right:12px; background:rgba(22,27,34,0.95); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:160px; display:flex; flex-direction:column; gap:6px; z-index:20;" onmousedown={stop_mouse_down.clone()}>
+        <div style="position:absolute; top:12px; right:12px; background:rgba(22,27,34,0.95); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:180px; display:flex; flex-direction:column; gap:6px; z-index:20;" onmousedown={stop_mouse_down.clone()}>
             <div style="font-weight:600;">{ format!("Research: {}", research) }</div>
             <button onclick={{ let cb=props.to_run.clone(); Callback::from(move |_| cb.emit(())) }}>{"Back"}</button>
+            <button onclick={open_reset} style="background:#3b1d1d; border:1px solid #5d2d2d;">{"Reset Progress"}</button>
         </div>
         <div style="position:absolute; left:12px; bottom:12px; background:rgba(22,27,34,0.95); border:1px solid #30363d; border-radius:8px; padding:8px; display:flex; gap:6px; align-items:center; z-index:20;" onmousedown={stop_mouse_down}>
             <button onclick={zoom_out_btn}> {"-"} </button>
@@ -254,5 +340,6 @@ pub fn upgrades_view(props: &UpgradesViewProps) -> Html {
                 { for nodes_html }
             </div>
         </div>
+        { reset_modal }
     </div> }
 }

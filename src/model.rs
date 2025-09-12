@@ -110,6 +110,14 @@ pub struct Enemy {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DamageNumber {
+    pub x: f64,
+    pub y: f64,
+    pub amount: u32,
+    pub ttl: f64, // seconds remaining
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunState {
     pub grid_size: GridSize,
     pub tiles: Vec<Tile>,
@@ -145,6 +153,8 @@ pub struct RunState {
     pub gold_bounty_per_kill: u64,
     pub gold_bounty_mul: f64,
     pub damage_ramp_per_sec: f64,
+    pub damage_numbers: Vec<DamageNumber>, // ephemeral floating numbers (not persisted across sessions)
+    pub projectile_speed: f64,             // NEW: modified by ProjectileSpeed upgrade
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +184,7 @@ pub struct Projectile {
     pub vy: f64,
     pub remaining: f64, // seconds until impact
     pub damage: u32,
+    pub splash_radius: f64, // 0 => no AoE (scaffolding for future)
 }
 
 impl Tower {
@@ -381,6 +392,8 @@ impl RunState {
             gold_bounty_per_kill: 0,
             gold_bounty_mul: 1.0,
             damage_ramp_per_sec: 0.0,
+            damage_numbers: Vec::new(),
+            projectile_speed: 8.0,
         };
         rs.path = compute_path(&rs);
         rs.path_loop = build_loop_path(&rs);
@@ -687,6 +700,7 @@ pub enum UpgradeId {
     TowerDamage2,
     DamageRamp,
     GridExpand,
+    ProjectileSpeed, // NEW: projectile velocity scaling
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -865,6 +879,16 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         cost_growth: 1.8,
         unlock: UnlockCondition::Maxed(UpgradeId::MiningSpeed),
     },
+    UpgradeDef {
+        // NEW projectile speed upgrade (append ONLY at end to keep indices stable)
+        id: UpgradeId::ProjectileSpeed,
+        name: "Projectile Speed",
+        desc: "+12% projectile speed / lvl",
+        max_level: 5,
+        base_cost: 26,
+        cost_growth: 1.55,
+        unlock: UnlockCondition::AnyLevel(UpgradeId::FireRate),
+    },
 ];
 
 impl UpgradeId {
@@ -890,6 +914,7 @@ impl UpgradeId {
             UpgradeId::TowerDamage2 => "TowerDamage2",
             UpgradeId::DamageRamp => "DamageRamp",
             UpgradeId::GridExpand => "GridExpand",
+            UpgradeId::ProjectileSpeed => "ProjectileSpeed",
         }
     }
 }
@@ -1052,6 +1077,7 @@ pub fn apply_upgrades_to_run(run: &mut RunState, ups: &UpgradeState) {
     run.crit_chance = 0.02 * l(CritChance); // capped later
     run.crit_damage_mult = 1.0 + 0.20 * l(CritDamage);
     run.damage_ramp_per_sec = 0.03 * l(DamageRamp);
+    run.projectile_speed = 8.0 * (1.0 + 0.12 * l(ProjectileSpeed));
     // Fresh-run dependent values (only if run not started yet)
     if run.stats.time_survived_secs == 0 && !run.started {
         let base_life = 20 + 5 * ups.level(Health) as u32;
@@ -1311,7 +1337,7 @@ impl Reducible for RunState {
                             let dx = tx - cx;
                             let dy = ty - cy;
                             let dist = (dx * dx + dy * dy).sqrt().max(1e-6);
-                            let speed = 8.0; // tiles per second
+                            let speed = new.projectile_speed; // was hardcoded 8.0
                             let travel_time = dist / speed;
                             let mut dmg = tw.damage as f64;
                             // damage ramp based on enemy age
@@ -1337,6 +1363,7 @@ impl Reducible for RunState {
                                 vy: dy / dist * speed,
                                 remaining: travel_time,
                                 damage: dmg.round() as u32,
+                                splash_radius: 0.0,
                             });
                             tw.cooldown_remaining =
                                 1.0 / (tw.fire_rate * new.tower_fire_rate_global.max(0.01));
@@ -1372,10 +1399,25 @@ impl Reducible for RunState {
                                 }
                                 if let Some(ei) = hit_index {
                                     if let Some(e) = new.enemies.get_mut(ei) {
+                                        let dmg_applied = p.damage.min(e.hp);
                                         if p.damage >= e.hp {
                                             e.hp = 0;
                                         } else {
                                             e.hp -= p.damage;
+                                        }
+                                        // spawn damage number at enemy position (slightly randomized horizontal jitter)
+                                        let jitter = (js_sys::Math::random() - 0.5) * 0.5; // wider horizontal spread
+                                        let jitter_y = (js_sys::Math::random() - 0.5) * 0.3; // slight vertical offset
+                                        new.damage_numbers.push(DamageNumber {
+                                            x: e.x + jitter,
+                                            y: e.y + jitter_y,
+                                            amount: dmg_applied,
+                                            ttl: 0.8,
+                                        });
+                                        if new.damage_numbers.len() > 256 {
+                                            // cap to avoid unbounded growth
+                                            let overflow = new.damage_numbers.len() - 256;
+                                            new.damage_numbers.drain(0..overflow);
                                         }
                                     }
                                 }
@@ -1409,6 +1451,13 @@ impl Reducible for RunState {
                         }
                     }
                 }
+                // Update damage numbers (fade & rise)
+                if !new.damage_numbers.is_empty() {
+                    for dn in &mut new.damage_numbers {
+                        dn.ttl -= dt;
+                    }
+                    new.damage_numbers.retain(|dn| dn.ttl > 0.0);
+                }
                 // Maintain path & enemies movement (unchanged below)
                 if new.path.is_empty() {
                     new.path = compute_path(&new);
@@ -1430,241 +1479,239 @@ impl Reducible for RunState {
                         e.path_index = next_i;
                     }
                 }
-                let total_len = new.loop_total_length;
-                if total_len > 1e-6 && dt > 0.0 {
-                    let nodes = new.path_loop.clone();
-                    let cum = new.loop_cum_lengths.clone();
-                    let n = nodes.len();
+                // Advance enemy movement along loop
+                if new.loop_total_length > 0.0 && new.path_loop.len() >= 2 {
+                    let total = new.loop_total_length;
+                    // helper to sample position along loop distance d
+                    let sample_pos = |nodes: &Vec<Position>, cum: &Vec<f64>, total: f64, d: f64| {
+                        if nodes.len() < 2 || total <= 0.0 {
+                            return (0.0, 0.0, 0.0, 0.0, 0usize);
+                        }
+                        let dist = d % total;
+                        let mut seg_i = 0usize;
+                        while seg_i + 1 < cum.len() && cum[seg_i + 1] <= dist {
+                            seg_i += 1;
+                        }
+                        // last segment closes loop
+                        let (ax, ay, bx, by, seg_len) = if seg_i + 1 < nodes.len() {
+                            let a = nodes[seg_i];
+                            let b = nodes[seg_i + 1];
+                            let seg_len = ((b.x as f64 - a.x as f64).powi(2)
+                                + (b.y as f64 - a.y as f64).powi(2))
+                            .sqrt()
+                            .max(1e-6);
+                            (
+                                a.x as f64 + 0.5,
+                                a.y as f64 + 0.5,
+                                b.x as f64 + 0.5,
+                                b.y as f64 + 0.5,
+                                seg_len,
+                            )
+                        } else {
+                            // closing segment last->first
+                            let a = nodes.last().unwrap();
+                            let b = nodes[0];
+                            let seg_len = ((b.x as f64 - a.x as f64).powi(2)
+                                + (b.y as f64 - a.y as f64).powi(2))
+                            .sqrt()
+                            .max(1e-6);
+                            (
+                                a.x as f64 + 0.5,
+                                a.y as f64 + 0.5,
+                                b.x as f64 + 0.5,
+                                b.y as f64 + 0.5,
+                                seg_len,
+                            )
+                        };
+                        let base = if seg_i < cum.len() { cum[seg_i] } else { 0.0 };
+                        let t = ((dist - base) / seg_len).clamp(0.0, 1.0);
+                        let dx = bx - ax;
+                        let dy = by - ay;
+                        let nx = ax + dx * t;
+                        let ny = ay + dy * t;
+                        let dir_dx = dx / seg_len;
+                        let dir_dy = dy / seg_len;
+                        (nx, ny, dir_dx, dir_dy, (seg_i + 1) % nodes.len())
+                    };
                     for e in &mut new.enemies {
-                        let prev_dist = e.loop_dist;
-                        e.loop_dist = (e.loop_dist + e.speed_tps * dt) % total_len;
-                        if e.loop_dist < prev_dist {
-                            // completed a loop
+                        let prev = e.loop_dist;
+                        e.loop_dist += e.speed_tps * dt;
+                        if e.loop_dist >= total {
+                            // loop completed
+                            e.loop_dist = e.loop_dist % total;
                             if new.life > 0 {
                                 new.life = new.life.saturating_sub(1);
-                                if new.stats.loops_completed < u32::MAX {
-                                    new.stats.loops_completed += 1;
-                                }
                             }
                             if new.life == 0 {
+                                new.game_over = true;
+                            }
+                            if new.stats.loops_completed < u32::MAX {
+                                new.stats.loops_completed += 1;
+                            }
+                        }
+                        let (nx, ny, dx, dy, next_i) =
+                            sample_pos(&new.path_loop, &new.loop_cum_lengths, total, e.loop_dist);
+                        e.x = nx;
+                        e.y = ny;
+                        e.dir_dx = dx;
+                        e.dir_dy = dy;
+                        e.path_index = next_i;
+                        // subtle scaling pulsation based on progress within tile
+                        e.radius_scale =
+                            1.0 + 0.0 * ((e.loop_dist / total) * std::f64::consts::TAU).sin();
+                        // preserve relative position when paused (handled earlier)
+                        let _ = prev; // suppress unused warning if radius_scale logic removed later
+                    }
+                }
+                // Enemy spawning (simplified): spawn every 3s based on time_survived_secs progression & loop length
+                {
+                    let spawn_interval = 3; // seconds
+                    if new
+                        .stats
+                        .time_survived_secs
+                        .saturating_sub(new.last_enemy_spawn_time_secs)
+                        as i64
+                        >= spawn_interval
+                        && !new.game_over
+                    {
+                        // find start tile
+                        let mut sx = 0u32;
+                        let mut sy = 0u32;
+                        let mut found = false;
+                        for (i, t) in new.tiles.iter().enumerate() {
+                            if let TileKind::Start = t.kind {
+                                sx = (i as u32) % new.grid_size.width;
+                                sy = (i as u32) / new.grid_size.width;
+                                found = true;
                                 break;
                             }
                         }
-                        if n < 2 {
-                            continue;
-                        }
-                        let seg_index = if e.loop_dist < cum[n - 1] {
-                            match cum
-                                .binary_search_by(|probe| probe.partial_cmp(&e.loop_dist).unwrap())
-                            {
-                                Ok(pos) => {
-                                    if pos == 0 {
-                                        0
-                                    } else {
-                                        pos - 1
-                                    }
-                                }
-                                Err(pos) => {
-                                    if pos == 0 {
-                                        0
-                                    } else {
-                                        pos - 1
-                                    }
-                                }
-                            }
-                        } else {
-                            n - 1
-                        };
-                        let a = nodes[seg_index];
-                        let b = nodes[(seg_index + 1) % n];
-                        let ax = a.x as f64 + 0.5;
-                        let ay = a.y as f64 + 0.5;
-                        let bx = b.x as f64 + 0.5;
-                        let by = b.y as f64 + 0.5;
-                        let seg_dx = bx - ax;
-                        let seg_dy = by - ay;
-                        let seg_len = if seg_index == n - 1 {
-                            let dx = bx - ax;
-                            let dy = by - ay;
-                            (dx * dx + dy * dy).sqrt()
-                        } else {
-                            ((b.x as f64 - a.x as f64).powi(2) + (b.y as f64 - a.y as f64).powi(2))
-                                .sqrt()
-                        }
-                        .max(1e-9);
-                        let base = if seg_index == n - 1 {
-                            cum[n - 1]
-                        } else {
-                            cum[seg_index]
-                        };
-                        let local = e.loop_dist - base;
-                        let t = (local / seg_len).clamp(0.0, 1.0);
-                        e.x = ax + seg_dx * t;
-                        e.y = ay + seg_dy * t;
-                        e.dir_dx = seg_dx / seg_len;
-                        e.dir_dy = seg_dy / seg_len;
-                        e.path_index = (seg_index + 1) % n;
-                    }
-                }
-                // Enemy spawning
-                if new.life > 0 {
-                    let t = new.stats.time_survived_secs;
-                    let need_spawn = new.path_loop.len() >= 2
-                        && (new.enemies.is_empty()
-                            || t.saturating_sub(new.last_enemy_spawn_time_secs) >= 2);
-                    if need_spawn {
-                        if let (Some(a), Some(b)) = (new.path_loop.get(0), new.path_loop.get(1)) {
-                            let mut dx = b.x as f64 - a.x as f64;
-                            let mut dy = b.y as f64 - a.y as f64;
-                            let mag = (dx * dx + dy * dy).sqrt();
-                            if mag > 1e-6 {
-                                dx /= mag;
-                                dy /= mag;
-                            }
-                            let speed = 1.0 + 0.002 * (t as f64);
-                            let hp = 5 + (t / 10) as u32;
-                            let rscale = 0.85 + js_sys::Math::random() * 0.3;
+                        if found && !new.path_loop.is_empty() {
+                            let hp = 5 + (new.stats.loops_completed / 2) as u32; // basic scaling
+                            let speed = 1.5 + (new.stats.loops_completed as f64) * 0.05;
                             new.enemies.push(Enemy {
-                                x: a.x as f64 + 0.5,
-                                y: a.y as f64 + 0.5,
+                                x: sx as f64 + 0.5,
+                                y: sy as f64 + 0.5,
                                 speed_tps: speed,
                                 hp,
-                                spawned_at: t,
-                                path_index: 1,
-                                dir_dx: dx,
-                                dir_dy: dy,
-                                radius_scale: rscale,
+                                spawned_at: new.stats.time_survived_secs,
+                                path_index: 0,
+                                dir_dx: 1.0,
+                                dir_dy: 0.0,
+                                radius_scale: 1.0,
                                 loop_dist: 0.0,
                             });
-                            new.last_enemy_spawn_time_secs = t;
+                            new.last_enemy_spawn_time_secs = new.stats.time_survived_secs;
                         }
                     }
-                }
-                if new.life == 0 && !new.game_over {
-                    new.game_over = true;
-                    new.is_paused = true;
                 }
             }
             PlaceWall { x, y } => {
-                if new.game_over { /* ignore */
-                } else if x < new.grid_size.width && y < new.grid_size.height {
-                    let idx = (y * new.grid_size.width + x) as usize;
-                    if let TileKind::Empty = new.tiles[idx].kind {
-                        new.tiles[idx].kind = TileKind::Rock {
-                            has_gold: false,
-                            boost: None,
-                        };
-                        new.tiles[idx].hardness = 3;
+                let gs = new.grid_size;
+                if x < gs.width && y < gs.height {
+                    let idx = (y * gs.width + x) as usize;
+                    // only place over Empty
+                    if matches!(new.tiles[idx].kind, TileKind::Empty) {
+                        // Tentatively place
+                        let old_kind = new.tiles[idx].kind.clone();
+                        new.tiles[idx].kind = TileKind::Wall;
                         let test_path = compute_path(&new);
                         if test_path.is_empty() {
-                            // revert to keep path
-                            new.tiles[idx].kind = TileKind::Empty;
-                            new.tiles[idx].hardness = 1;
+                            // blocked path -> revert
+                            new.tiles[idx].kind = old_kind;
                         } else {
                             new.path = test_path;
                             new.path_loop = build_loop_path(&new);
                             update_loop_geometry(&mut new);
-                            let nodes = new.path_loop.clone();
-                            let cum = new.loop_cum_lengths.clone();
-                            let total = new.loop_total_length;
-                            for e in &mut new.enemies {
-                                let (d, dx, dy, next_i) = project_distance_on_loop_snapshot(
-                                    &nodes, &cum, total, e.x, e.y,
-                                );
-                                e.loop_dist = d;
-                                e.dir_dx = dx;
-                                e.dir_dy = dy;
-                                e.path_index = next_i;
-                            }
                         }
                     }
                 }
             }
             PlaceTower { x, y } => {
-                if new.game_over { /* ignore */
-                } else if x < new.grid_size.width && y < new.grid_size.height {
-                    let idx = (y * new.grid_size.width + x) as usize;
-                    if !new.towers.iter().any(|t| t.x == x && t.y == y) {
-                        if let TileKind::Rock { boost, .. } = new.tiles[idx].kind.clone() {
-                            if new.currencies.gold >= new.tower_cost {
-                                let kind = match boost {
-                                    Some(BoostKind::Slow) => TowerKind::Slow,
-                                    Some(BoostKind::Damage) => TowerKind::Damage,
-                                    _ => TowerKind::Basic,
-                                };
-                                new.currencies.gold =
-                                    new.currencies.gold.saturating_sub(new.tower_cost);
-                                new.towers.push(Tower::new(
-                                    x,
-                                    y,
-                                    kind,
-                                    new.tower_base_range,
-                                    new.tower_base_damage,
-                                ));
-                            }
+                // allow on Rock or Wall, no existing tower, enough gold
+                let gs = new.grid_size;
+                if x < gs.width && y < gs.height && new.currencies.gold >= new.tower_cost {
+                    let idx = (y * gs.width + x) as usize;
+                    if matches!(new.tiles[idx].kind, TileKind::Rock { .. } | TileKind::Wall) {
+                        if !new.towers.iter().any(|t| t.x == x && t.y == y) {
+                            new.currencies.gold -= new.tower_cost;
+                            new.towers.push(Tower::new(
+                                x,
+                                y,
+                                TowerKind::Basic,
+                                new.tower_base_range,
+                                new.tower_base_damage,
+                            ));
                         }
                     }
                 }
             }
             RemoveTower { x, y } => {
-                if new.game_over { /* ignore */
-                } else {
-                    let before = new.towers.len();
-                    new.towers.retain(|t| !(t.x == x && t.y == y));
-                    if new.towers.len() < before {
-                        new.currencies.gold = new.currencies.gold.saturating_add(new.tower_cost);
-                    }
+                if let Some(pos) = new.towers.iter().position(|t| t.x == x && t.y == y) {
+                    new.towers.remove(pos);
+                    // simple full refund for now
+                    new.currencies.gold = new.currencies.gold.saturating_add(new.tower_cost);
                 }
             }
         }
-        new.version = new.version.saturating_add(1);
+        // version bump for any state change (cheap optimistic approach)
+        new.version = new.version.wrapping_add(1);
         Rc::new(new)
     }
 }
 
-// Helper for reprojecting enemies after path changes
-fn project_distance_on_loop_snapshot(
+// Helper referenced earlier (distance projection) retained if still needed elsewhere
+pub fn project_distance_on_loop_snapshot(
     nodes: &Vec<Position>,
     cum: &Vec<f64>,
     total: f64,
     x: f64,
     y: f64,
 ) -> (f64, f64, f64, usize) {
-    let n = nodes.len();
-    if n < 2 || total <= 1e-9 {
+    if nodes.len() < 2 || total <= 0.0 {
         return (0.0, 1.0, 0.0, 0);
     }
+    // naive closest segment projection
     let mut best_d2 = f64::MAX;
-    let mut best = (0.0, 1.0, 0.0, 1usize);
-    for i in 0..n {
+    let mut best_dist = 0.0;
+    let mut best_dx = 1.0;
+    let mut best_dy = 0.0;
+    let mut best_next = 0usize;
+    for i in 0..nodes.len() {
         let a = nodes[i];
-        let b = nodes[(i + 1) % n];
+        let b = if i + 1 < nodes.len() {
+            nodes[i + 1]
+        } else {
+            nodes[0]
+        };
         let ax = a.x as f64 + 0.5;
         let ay = a.y as f64 + 0.5;
         let bx = b.x as f64 + 0.5;
         let by = b.y as f64 + 0.5;
-        let dx = bx - ax;
-        let dy = by - ay;
-        let seg_len2 = dx * dx + dy * dy;
-        if seg_len2 < 1e-12 {
+        let vx = bx - ax;
+        let vy = by - ay;
+        let seg_len2 = vx * vx + vy * vy;
+        if seg_len2 <= 1e-9 {
             continue;
         }
-        let t = ((x - ax) * dx + (y - ay) * dy) / seg_len2;
-        let tc = t.clamp(0.0, 1.0);
-        let px = ax + dx * tc;
-        let py = ay + dy * tc;
-        let d2 = (px - x) * (px - x) + (py - y) * (py - y);
+        let px = x - ax;
+        let py = y - ay;
+        let t = (px * vx + py * vy) / seg_len2;
+        let tclamped = t.clamp(0.0, 1.0);
+        let cx = ax + vx * tclamped;
+        let cy = ay + vy * tclamped;
+        let dx = x - cx;
+        let dy = y - cy;
+        let d2 = dx * dx + dy * dy;
         if d2 < best_d2 {
             best_d2 = d2;
             let seg_len = seg_len2.sqrt();
-            let mut loop_dist = (if i == 0 { 0.0 } else { cum[i] }) + seg_len * tc;
-            if i == n - 1 {
-                let closing_start = total - seg_len;
-                loop_dist = closing_start + seg_len * tc;
-            }
-            let mag = seg_len.max(1e-6);
-            best = (loop_dist % total, dx / mag, dy / mag, (i + 1) % n);
+            let base = cum.get(i).copied().unwrap_or(0.0);
+            best_dist = base + seg_len * tclamped;
+            best_dx = vx / seg_len;
+            best_dy = vy / seg_len;
+            best_next = (i + 1) % nodes.len();
         }
     }
-    best
+    (best_dist % total, best_dx, best_dy, best_next)
 }

@@ -1,14 +1,19 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlElement, TouchEvent};
 use yew::prelude::*;
 
-use super::legend::LegendRow;
 use crate::model::{self, RunAction, RunState, TowerKind};
-use crate::state::{Camera, Mining, TouchState, compute_interactable_mask};
-use crate::util::{clog, format_time};
+use crate::state::{compute_interactable_mask, Camera, Mining, TouchState};
+use crate::util::clog;
+// Replace direct legend row usage with modular components
+use super::{
+    camera_controls::CameraControls, controls_panel::ControlsPanel,
+    game_over_overlay::GameOverOverlay, intro_overlay::IntroOverlay, legend_panel::LegendPanel,
+    settings_modal::SettingsModal, stats_panel::StatsPanel, time_display::TimeDisplay,
+};
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct RunViewProps {
@@ -24,12 +29,50 @@ pub fn run_view(props: &RunViewProps) -> Html {
     let mining = use_mut_ref(|| Mining::default());
     let draw_ref = use_mut_ref(|| None::<Rc<dyn Fn()>>);
     let run_state_ref = use_mut_ref(|| props.run_state.clone());
-    let show_path = use_state(|| false);
+    let show_path = use_state(|| {
+        if let Some(win) = web_sys::window() {
+            if let Ok(Some(store)) = win.local_storage() {
+                if let Ok(Some(v)) = store.get_item("md_setting_show_path") {
+                    return v == "1" || v == "true";
+                }
+            }
+        }
+        false
+    });
     let show_path_flag = use_mut_ref(|| false);
+    let show_damage_numbers = use_state(|| {
+        if let Some(win) = web_sys::window() {
+            if let Ok(Some(store)) = win.local_storage() {
+                if let Ok(Some(v)) = store.get_item("md_setting_show_damage_numbers") {
+                    return !(v == "0" || v == "false");
+                }
+            }
+        }
+        true // default ON
+    });
+    let show_damage_numbers_flag = use_mut_ref(|| true);
+    let open_settings = use_state(|| false);
     let touch_state = use_mut_ref(|| TouchState::default());
     let tower_feedback = use_state(|| String::new());
     let hover_tile = use_mut_ref(|| (-1_i32, -1_i32));
+    let hover_tile_effect = hover_tile.clone(); // clone for effects to avoid moving original
     let tower_feedback_for_effect = tower_feedback.clone();
+    // NEW: intro overlay visibility (persist across sessions)
+    let show_intro = {
+        let initial = {
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(store)) = win.local_storage() {
+                    // Show only if key absent
+                    store.get_item("md_intro_seen").ok().flatten().is_none()
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        };
+        use_state(|| initial)
+    };
 
     // Effect: toggle path
     {
@@ -38,6 +81,32 @@ pub fn run_view(props: &RunViewProps) -> Html {
         let show_path_flag_ref = show_path_flag.clone();
         use_effect_with(flag, move |_| {
             *show_path_flag_ref.borrow_mut() = flag;
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(store)) = win.local_storage() {
+                    let _ = store.set_item("md_setting_show_path", if flag { "1" } else { "0" });
+                }
+            }
+            if let Some(f) = &*draw_ref.borrow() {
+                f();
+            }
+            || ()
+        });
+    }
+    // Effect: toggle damage numbers
+    {
+        let draw_ref = draw_ref.clone();
+        let flag = *show_damage_numbers;
+        let show_damage_numbers_flag_ref = show_damage_numbers_flag.clone();
+        use_effect_with(flag, move |_| {
+            *show_damage_numbers_flag_ref.borrow_mut() = flag;
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(store)) = win.local_storage() {
+                    let _ = store.set_item(
+                        "md_setting_show_damage_numbers",
+                        if flag { "1" } else { "0" },
+                    );
+                }
+            }
             if let Some(f) = &*draw_ref.borrow() {
                 f();
             }
@@ -73,8 +142,14 @@ pub fn run_view(props: &RunViewProps) -> Html {
         let run_state = props.run_state.clone();
         let draw_ref_setup = draw_ref.clone();
         let mining_setup = mining.clone();
+        let hover_tile_effect_local = hover_tile_effect.clone();
+        // Clone state handles so the originals remain usable in render scope
+        let tower_feedback_clone = tower_feedback_for_effect.clone();
+        let show_intro_clone = show_intro.clone();
         use_effect_with((), move |_| {
-            let tower_feedback_handle = tower_feedback_for_effect.clone();
+            // Use cloned handles inside effect
+            let tower_feedback_handle = tower_feedback_clone.clone();
+            let show_intro_handle = show_intro_clone.clone();
             let window = web_sys::window().expect("window");
             let document = window.document().expect("document");
             let canvas: HtmlCanvasElement = canvas_ref.cast::<HtmlCanvasElement>().expect("canvas");
@@ -137,7 +212,8 @@ pub fn run_view(props: &RunViewProps) -> Html {
                 let run_state_ref = run_state_ref.clone();
                 let mining = mining_setup.clone();
                 let show_path_flag = show_path_flag.clone();
-                let hover_tile_draw = hover_tile.clone();
+                let show_damage_numbers_flag = show_damage_numbers_flag.clone();
+                let hover_tile_draw = hover_tile_effect_local.clone();
                 let tower_feedback_draw = tower_feedback_handle.clone();
                 Rc::new(move || {
                     if !canvas.is_connected() {
@@ -155,6 +231,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
                     let rs_handle = run_state_ref.borrow();
                     let rs = (**rs_handle).clone();
                     let show_path_on = *show_path_flag.borrow();
+                    let show_damage_nums_on = *show_damage_numbers_flag.borrow();
                     let interact_mask = compute_interactable_mask(&rs);
                     ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0).ok();
                     ctx.set_fill_style_str("#0e1116");
@@ -326,6 +403,20 @@ pub fn run_view(props: &RunViewProps) -> Html {
                             ctx.fill();
                         }
                     }
+                    // Damage numbers (floating text)
+                    if show_damage_nums_on && !rs.damage_numbers.is_empty() {
+                        ctx.set_font(&format!("{}px sans-serif", (0.2 / scale_px).max(0.5))); // 10% of prior 6.0 baseline
+                        ctx.set_text_align("center");
+                        for dn in &rs.damage_numbers {
+                            let life_ratio = (dn.ttl / 0.8).clamp(0.0, 1.0);
+                            let rise = (0.8 - dn.ttl).max(0.0) * 0.30; // slightly reduced rise for very small text
+                            let alpha = life_ratio;
+                            ctx.set_fill_style_str(&format!("rgba(255,50,50,{:.3})", alpha)); // red color
+                            ctx.fill_text(&dn.amount.to_string(), dn.x, dn.y - rise)
+                                .ok();
+                        }
+                        ctx.set_text_align("start");
+                    }
                     let m = mining.borrow();
                     if m.active && m.mouse_down {
                         if m.tile_x >= 0
@@ -396,10 +487,22 @@ pub fn run_view(props: &RunViewProps) -> Html {
                                     "Out of reach".to_string(),
                                     false,
                                 )
-                            } else if rs.is_paused || rs.game_over {
-                                (Some("rgba(110,118,129,0.35)"), "Paused".to_string(), false)
-                            } else if !matches!(rs.tiles[idx].kind, model::TileKind::Rock { .. }) {
-                                (Some("rgba(248,81,73,0.45)"), "Need Rock".to_string(), false)
+                            } else if rs.game_over {
+                                // removed rs.is_paused here to allow placement while paused
+                                (
+                                    Some("rgba(110,118,129,0.35)"),
+                                    "Game Over".to_string(),
+                                    false,
+                                )
+                            } else if !matches!(
+                                rs.tiles[idx].kind,
+                                model::TileKind::Rock { .. } | model::TileKind::Wall
+                            ) {
+                                (
+                                    Some("rgba(248,81,73,0.45)"),
+                                    "Need Rock/Wall".to_string(),
+                                    false,
+                                )
                             } else if rs
                                 .towers
                                 .iter()
@@ -597,14 +700,36 @@ pub fn run_view(props: &RunViewProps) -> Html {
             canvas
                 .add_event_listener_with_callback("wheel", wheel_cb.as_ref().unchecked_ref())
                 .unwrap();
-            // Keydown T
+            // Keydown + tower hotkey (Space + T)
             let keydown_cb = {
                 let run_state_ref_ct = run_state_ref.clone();
-                let hover_ref = hover_tile.clone();
+                let hover_ref = hover_tile_effect_local.clone();
                 let tower_feedback_hotkey = tower_feedback_handle.clone();
                 let draw_ref_k = draw_ref_setup.clone();
+                let show_intro_handle_k = show_intro_handle.clone();
                 Closure::wrap(Box::new(move |e: web_sys::KeyboardEvent| {
-                    if e.key() == "t" || e.key() == "T" {
+                    // Spacebar: dismiss intro if showing, else toggle pause
+                    let key = e.key();
+                    let code = e.code();
+                    if code == "Space" || key == " " || key == "Space" || key == "Spacebar" {
+                        e.prevent_default();
+                        if *show_intro_handle_k {
+                            show_intro_handle_k.set(false);
+                            if let Some(win) = web_sys::window() {
+                                if let Ok(Some(store)) = win.local_storage() {
+                                    let _ = store.set_item("md_intro_seen", "1");
+                                }
+                            }
+                            return;
+                        }
+                        let handle = run_state_ref_ct.borrow().clone();
+                        if !handle.game_over {
+                            handle.dispatch(RunAction::TogglePause);
+                        }
+                        return;
+                    }
+                    // T: place/remove tower
+                    if key == "t" || key == "T" {
                         e.prevent_default();
                         let (hx, hy) = *hover_ref.borrow();
                         if hx < 0 || hy < 0 {
@@ -612,6 +737,10 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         }
                         let handle = run_state_ref_ct.borrow().clone();
                         let rs = (*handle).clone();
+                        if rs.game_over {
+                            return;
+                        }
+                        let was_paused = rs.is_paused; // remember paused state
                         let gs = rs.grid_size;
                         if (hx as u32) >= gs.width || (hy as u32) >= gs.height {
                             return;
@@ -620,10 +749,6 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         let idx = (hy as u32 * gs.width + hx as u32) as usize;
                         if !interact_mask[idx] {
                             tower_feedback_hotkey.set("Out of reach".into());
-                            return;
-                        }
-                        if rs.is_paused || rs.game_over {
-                            tower_feedback_hotkey.set("Paused".into());
                             return;
                         }
                         if let model::TileKind::Rock { .. } = rs.tiles[idx].kind {
@@ -637,17 +762,50 @@ pub fn run_view(props: &RunViewProps) -> Html {
                                     y: hy as u32,
                                 });
                                 tower_feedback_hotkey.set("Tower removed".into());
+                                // Do NOT auto-unpause on removal (spec only asks for placement)
                             } else if rs.currencies.gold < rs.tower_cost {
                                 tower_feedback_hotkey.set(format!("Need {} gold", rs.tower_cost));
                             } else {
+                                if !rs.started {
+                                    handle.dispatch(RunAction::StartRun);
+                                }
                                 handle.dispatch(RunAction::PlaceTower {
                                     x: hx as u32,
                                     y: hy as u32,
                                 });
                                 tower_feedback_hotkey.set("Tower placed".into());
+                                if was_paused {
+                                    handle.dispatch(RunAction::TogglePause);
+                                }
+                            }
+                        } else if let model::TileKind::Wall = rs.tiles[idx].kind {
+                            let has_t = rs
+                                .towers
+                                .iter()
+                                .any(|t| t.x == hx as u32 && t.y == hy as u32);
+                            if has_t {
+                                handle.dispatch(RunAction::RemoveTower {
+                                    x: hx as u32,
+                                    y: hy as u32,
+                                });
+                                tower_feedback_hotkey.set("Tower removed".into());
+                            } else if rs.currencies.gold < rs.tower_cost {
+                                tower_feedback_hotkey.set(format!("Need {} gold", rs.tower_cost));
+                            } else {
+                                if !rs.started {
+                                    handle.dispatch(RunAction::StartRun);
+                                }
+                                handle.dispatch(RunAction::PlaceTower {
+                                    x: hx as u32,
+                                    y: hy as u32,
+                                });
+                                tower_feedback_hotkey.set("Tower placed".into());
+                                if was_paused {
+                                    handle.dispatch(RunAction::TogglePause);
+                                }
                             }
                         } else {
-                            tower_feedback_hotkey.set("Need Rock".into());
+                            tower_feedback_hotkey.set("Need Rock/Wall".into());
                         }
                         if let Some(f) = &*draw_ref_k.borrow() {
                             f();
@@ -744,7 +902,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
                 let mining = mining_setup.clone();
                 let run_state_ref_ct = run_state_ref.clone();
                 let draw_ref = draw_ref_setup.clone();
-                let hover_tile_move = hover_tile.clone();
+                let hover_tile_move = hover_tile_effect_local.clone();
                 Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
                     let mut cam = camera.borrow_mut();
                     if cam.panning {
@@ -879,11 +1037,13 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         let rect = canvas_tc.get_bounding_client_rect();
                         let cx = t0.client_x() as f64 - rect.left();
                         let cy = t0.client_y() as f64 - rect.top();
+                        // Compute world coords (were missing causing compile error)
                         let cam = camera_tc.borrow_mut();
                         let tile_px = 32.0;
                         let scale_px = cam.zoom * tile_px;
                         let world_x = (cx - cam.offset_x) / scale_px;
                         let world_y = (cy - cam.offset_y) / scale_px;
+                        drop(cam);
                         let mut ts = touch_state_tc.borrow_mut();
                         ts.last_touch_x = cx;
                         ts.last_touch_y = cy;
@@ -1121,6 +1281,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
                     &touch_start_cb,
                     &touch_move_cb,
                     &touch_end_cb,
+                    &keydown_cb,
                 );
             }
         });
@@ -1198,6 +1359,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
     let mut has_entrance = false;
     let mut has_exit = false;
     let mut has_indestructible = false;
+    let mut has_wall = false;
     for t in &rs_snapshot.tiles {
         match &t.kind {
             model::TileKind::Rock { has_gold: hg, .. } => {
@@ -1214,9 +1376,146 @@ pub fn run_view(props: &RunViewProps) -> Html {
                 model::DirRole::Exit => has_exit = true,
             },
             model::TileKind::Indestructible => has_indestructible = true,
+            model::TileKind::Wall => has_wall = true,
             _ => {}
         }
     }
+
+    // Hover tile legend highlight mapping
+    let (
+        hover_text,
+        hl_start,
+        hl_entrance,
+        hl_exit,
+        hl_indestructible,
+        hl_basic,
+        hl_gold,
+        hl_empty,
+        hl_wall,
+    ) = {
+        let (hx, hy) = *hover_tile.borrow();
+        if hx >= 0 && hy >= 0 {
+            let hx_u = hx as u32;
+            let hy_u = hy as u32;
+            let gs = rs_snapshot.grid_size;
+            if hx_u < gs.width && hy_u < gs.height {
+                let idx = (hy_u * gs.width + hx_u) as usize;
+                let tile = &rs_snapshot.tiles[idx];
+                match &tile.kind {
+                    model::TileKind::Start => (
+                        Some(format!("({},{}) Start", hx_u, hy_u)),
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                    ),
+                    model::TileKind::Direction { role, .. } => match role {
+                        model::DirRole::Entrance => (
+                            Some(format!("({},{}) Entrance", hx_u, hy_u)),
+                            false,
+                            true,
+                            false,
+                            false,
+                            false,
+                            false,
+                            false,
+                            false,
+                        ),
+                        model::DirRole::Exit => (
+                            Some(format!("({},{}) Exit", hx_u, hy_u)),
+                            false,
+                            false,
+                            true,
+                            false,
+                            false,
+                            false,
+                            false,
+                            false,
+                        ),
+                    },
+                    model::TileKind::Indestructible => (
+                        Some(format!("({},{}) Indestructible", hx_u, hy_u)),
+                        false,
+                        false,
+                        false,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                    ),
+                    model::TileKind::Rock { has_gold: hg, .. } => {
+                        if *hg {
+                            (
+                                Some(format!("({},{}) Gold Rock", hx_u, hy_u)),
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                true,
+                                false,
+                                false,
+                            )
+                        } else {
+                            (
+                                Some(format!("({},{}) Rock", hx_u, hy_u)),
+                                false,
+                                false,
+                                false,
+                                false,
+                                true,
+                                false,
+                                false,
+                                false,
+                            )
+                        }
+                    }
+                    model::TileKind::Empty => (
+                        Some(format!("({},{}) Path", hx_u, hy_u)),
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        true,
+                        false,
+                    ),
+                    model::TileKind::Wall => (
+                        Some(format!("({},{}) Wall", hx_u, hy_u)),
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        true,
+                    ),
+                    model::TileKind::End => (
+                        Some(format!("({},{}) End", hx_u, hy_u)),
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                    ),
+                }
+            } else {
+                (None, false, false, false, false, false, false, false, false)
+            }
+        } else {
+            (None, false, false, false, false, false, false, false, false)
+        }
+    };
 
     let rs_overlay = (*props.run_state).clone();
     let gold_ov = rs_overlay.currencies.gold;
@@ -1240,28 +1539,13 @@ pub fn run_view(props: &RunViewProps) -> Html {
     } else {
         "Pause (Space)"
     };
-    let toggle_pause_rv = {
-        let run_state = props.run_state.clone();
-        Callback::from(move |_| {
-            if !run_state.game_over {
-                run_state.dispatch(RunAction::TogglePause);
-            }
-        })
-    };
-    let restart_cb = {
-        let restart_run = props.restart_run.clone();
-        Callback::from(move |_| restart_run.emit(()))
-    };
-    let to_upgrades_click = {
-        let cb = props.to_upgrades.clone();
-        Callback::from(move |_| cb.emit(()))
-    };
 
     // camera control buttons
-    let zoom_in = {
+    // (refactored to produce Callback<()> for new CameraControls component)
+    let zoom_in_cb: Callback<()> = {
         let camera = camera.clone();
         let canvas_ref = canvas_ref.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             if let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() {
                 let mut cam = camera.borrow_mut();
                 let tile_px = 32.0;
@@ -1282,10 +1566,10 @@ pub fn run_view(props: &RunViewProps) -> Html {
                 .dispatch_event(&web_sys::Event::new("resize").unwrap());
         })
     };
-    let zoom_out = {
+    let zoom_out_cb: Callback<()> = {
         let camera = camera.clone();
         let canvas_ref = canvas_ref.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             if let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() {
                 let mut cam = camera.borrow_mut();
                 let tile_px = 32.0;
@@ -1306,9 +1590,9 @@ pub fn run_view(props: &RunViewProps) -> Html {
                 .dispatch_event(&web_sys::Event::new("resize").unwrap());
         })
     };
-    let pan_by = |dx: f64, dy: f64| {
+    let pan_cb = |dx: f64, dy: f64| {
         let camera = camera.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             let mut cam = camera.borrow_mut();
             cam.offset_x += dx;
             cam.offset_y += dy;
@@ -1318,11 +1602,11 @@ pub fn run_view(props: &RunViewProps) -> Html {
                 .dispatch_event(&web_sys::Event::new("resize").unwrap());
         })
     };
-    let center_on_start = {
+    let center_cb: Callback<()> = {
         let camera = camera.clone();
         let canvas_ref = canvas_ref.clone();
         let run_state = props.run_state.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             if let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() {
                 let w = canvas.width() as f64;
                 let h = canvas.height() as f64;
@@ -1351,87 +1635,124 @@ pub fn run_view(props: &RunViewProps) -> Html {
         })
     };
 
-    let path_debug_text = if *show_path {
-        let rsd = (*props.run_state).clone();
-        let source = if !rsd.path_loop.is_empty() {
-            &rsd.path_loop
+    // Pause & path toggle callbacks adapted to unit callbacks for new components
+    let toggle_pause_cb: Callback<()> = {
+        let run_state = props.run_state.clone();
+        Callback::from(move |()| {
+            if !run_state.game_over {
+                run_state.dispatch(RunAction::TogglePause);
+            }
+        })
+    };
+    let toggle_path_cb: Callback<()> = {
+        let show_path = show_path.clone();
+        Callback::from(move |()| show_path.set(!*show_path))
+    };
+    let toggle_damage_numbers_cb: Callback<()> = {
+        let show_damage_numbers = show_damage_numbers.clone();
+        Callback::from(move |()| show_damage_numbers.set(!*show_damage_numbers))
+    };
+    let open_settings_cb: Callback<()> = {
+        let open_settings = open_settings.clone();
+        Callback::from(move |()| open_settings.set(true))
+    };
+    let close_settings_cb: Callback<()> = {
+        let open_settings = open_settings.clone();
+        Callback::from(move |()| open_settings.set(false))
+    };
+    // restart & upgrades already callbacks with ()
+    let restart_cb_unit: Callback<()> = {
+        let restart = props.restart_run.clone();
+        Callback::from(move |()| restart.emit(()))
+    };
+    let to_upgrades_unit: Callback<()> = {
+        let cb = props.to_upgrades.clone();
+        Callback::from(move |()| cb.emit(()))
+    };
+
+    // Path nodes debug string
+    let path_debug_text = {
+        if !*show_path {
+            String::new()
         } else {
-            &rsd.path
-        };
-        if source.is_empty() {
-            "(empty)".to_string()
-        } else {
-            let mut s = String::new();
-            for (i, p) in source.iter().enumerate() {
-                if i > 0 {
-                    s.push_str(" -> ");
+            let rsd = (*props.run_state).clone();
+            let source = if !rsd.path_loop.is_empty() {
+                &rsd.path_loop
+            } else {
+                &rsd.path
+            };
+            if source.is_empty() {
+                "(empty)".to_string()
+            } else {
+                let mut s = String::new();
+                for (i, p) in source.iter().enumerate() {
+                    if i > 0 {
+                        s.push_str(" -> ");
+                    }
+                    s.push_str(&format!("({},{})", p.x, p.y));
+                    if i > 14 {
+                        s.push_str(" ...");
+                        break;
+                    }
                 }
-                s.push_str(&format!("({},{})", p.x, p.y));
-                if i > 14 {
-                    s.push_str(" ...");
-                    break;
+                s
+            }
+        }
+    };
+    // Path nodes text optional
+    let path_nodes_text_opt = if *show_path {
+        Some(path_debug_text.clone())
+    } else {
+        None
+    };
+
+    // Intro overlay hide callback
+    let hide_intro_cb: Callback<()> = {
+        let show_intro = show_intro.clone();
+        Callback::from(move |()| {
+            show_intro.set(false);
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(store)) = win.local_storage() {
+                    let _ = store.set_item("md_intro_seen", "1");
                 }
             }
-            s
-        }
-    } else {
-        String::new()
+        })
     };
-    let path_nodes_style = if *show_path {
-        "font-size:11px; opacity:0.7;"
-    } else {
-        "font-size:11px; opacity:0.7; display:none;"
+
+    // Help button callback (re-show intro without clearing seen flag)
+    let show_help_cb: Callback<()> = {
+        let show_intro = show_intro.clone();
+        Callback::from(move |()| show_intro.set(true))
     };
+
+    // Tower feedback option
+    let tower_feedback_opt = if tower_feedback.is_empty() {
+        None
+    } else {
+        Some((*tower_feedback).clone())
+    };
+
+    // Legend component boolean flags already computed
 
     html! {<div style="position:relative; width:100vw; height:100vh;">
         <canvas ref={canvas_ref.clone()} id="game-canvas" style="display:block; width:100%; height:100%;"></canvas>
-        <div style="position:absolute; top:12px; left:50%; transform:translateX(-50%); font-size:20px; font-weight:600;">{ format_time(time_ov) }</div>
-        <div style="position:absolute; top:12px; left:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:180px; display:flex; flex-direction:column; gap:6px;">
-            <div>{ format!("Gold: {}", gold_ov) }</div>
-            <div>{ format!("Life: {}", life_ov) }</div>
-            <div>{ format!("Research: {}", research_ov) }</div>
-            <div style="font-size:11px; opacity:0.7;">{ format!("Run: {}", rs_overlay.run_id) }</div>
-            <div style="font-size:11px; opacity:0.7;">{ format!("Enemies: {}", enemy_count) }</div>
-            <div style="font-size:11px; opacity:0.7;">{ format!("Path: {}", path_len) }</div>
-            <div style={path_nodes_style.to_string()}>{ format!("PathNodes: {}", path_debug_text) }</div>
-        </div>
-        <div style="position:absolute; top:12px; right:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:200px; display:flex; flex-direction:column; gap:6px;">
-            <button onclick={toggle_pause_rv.clone()}>{ pause_label_rv }</button>
-            <button onclick={{ let show_path=show_path.clone(); Callback::from(move |_| show_path.set(!*show_path)) }}>{ if *show_path { "Hide Path" } else { "Show Path" } }</button>
-            <button onclick={to_upgrades_click.clone()}>{"Upgrades"}</button>
-            <div style="font-size:11px; opacity:0.7;">{"Hotkey: 'T' place/remove tower"}</div>
-            { if !tower_feedback.is_empty() { html!{ <div style="font-size:11px; line-height:1.2; background:#1c2128; border:1px solid #30363d; padding:4px 6px; border-radius:6px;">{ (*tower_feedback).clone() }</div> } } else { html!{} } }
-        </div>
-        <div style="position:absolute; left:12px; bottom:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; display:flex; gap:6px; align-items:center;">
-            <button onclick={zoom_out.clone()}> {"-"} </button>
-            <button onclick={zoom_in.clone()}> {"+"} </button>
-            <span style="width:8px;"></span>
-            <button onclick={pan_by(-64.0,0.0)}> {"←"} </button>
-            <button onclick={pan_by(0.0,-64.0)}> {"↑"} </button>
-            <button onclick={pan_by(0.0,64.0)}> {"↓"} </button>
-            <button onclick={pan_by(64.0,0.0)}> {"→"} </button>
-            <span style="width:8px;"></span>
-            <button onclick={center_on_start.clone()}> {"Center"} </button>
-        </div>
-        <div style="position:absolute; right:12px; bottom:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:8px; min-width:160px;">
-            <div style="font-weight:600; margin-bottom:6px;">{"Legend"}</div>
-            { if has_start { html!{ <LegendRow color="#58a6ff" label="Start" /> } } else { html!{} } }
-            { if has_entrance { html!{ <LegendRow color="#2ea043" label="Entrance" /> } } else { html!{} } }
-            { if has_exit { html!{ <LegendRow color="#f0883e" label="Exit" /> } } else { html!{} } }
-            { if has_indestructible { html!{ <LegendRow color="#3c4454" label="Indestructible" /> } } else { html!{} } }
-            { if has_basic { html!{ <LegendRow color="#1d2430" label="Rock" /> } } else { html!{} } }
-            { if has_gold { html!{ <LegendRow color="#4d3b1f" label="Gold Rock" /> } } else { html!{} } }
-            { if has_empty { html!{ <LegendRow color="#082235" label="Path" /> } } else { html!{} } }
-        </div>
-        { if game_over { html!{ <div style="position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); background:rgba(0,0,0,0.85); border:2px solid #f85149; padding:24px 32px; border-radius:12px; text-align:center; min-width:320px;">
-            <h2 style="margin:0 0 12px 0; color:#f85149;">{"Game Over"}</h2>
-            <p style="margin:4px 0;">{ format!("Time Survived: {}", format_time(time_ov)) }</p>
-            <p style="margin:4px 0;">{ format!("Loops Completed: {}", rs_overlay.stats.loops_completed) }</p>
-            <p style="margin:4px 0;">{ format!("Blocks Mined: {}", rs_overlay.stats.blocks_mined) }</p>
-            <div style="margin-top:16px; display:flex; gap:12px; justify-content:center;">
-                <button onclick={restart_cb.clone()}> {"Restart Run"} </button>
-                <button onclick={to_upgrades_click.clone()}> {"Upgrades"} </button>
-            </div>
-        </div> } } else { html!{} } }
+        <TimeDisplay time_survived={time_ov} />
+        <IntroOverlay show={*show_intro} game_over={game_over} hide_intro={hide_intro_cb} to_upgrades={to_upgrades_unit.clone()} />
+        <StatsPanel gold={gold_ov} life={life_ov} research={research_ov} run_id={rs_overlay.run_id} enemy_count={enemy_count} path_len={path_len} path_nodes_text={path_nodes_text_opt} />
+        <ControlsPanel pause_label={pause_label_rv.to_string()} on_toggle_pause={toggle_pause_cb} to_upgrades={to_upgrades_unit.clone()} tower_feedback={tower_feedback_opt} on_show_help={show_help_cb} on_open_settings={open_settings_cb} />
+        <CameraControls on_zoom_in={zoom_in_cb} on_zoom_out={zoom_out_cb} on_pan_left={pan_cb(-64.0,0.0)} on_pan_right={pan_cb(64.0,0.0)} on_pan_up={pan_cb(0.0,-64.0)} on_pan_down={pan_cb(0.0,64.0)} on_center={center_cb} />
+        <LegendPanel has_start={has_start} has_entrance={has_entrance} has_exit={has_exit} has_indestructible={has_indestructible} has_basic={has_basic} has_gold={has_gold} has_empty={has_empty} has_wall={has_wall}
+            hover_text={hover_text}
+            highlight_start={hl_start}
+            highlight_entrance={hl_entrance}
+            highlight_exit={hl_exit}
+            highlight_indestructible={hl_indestructible}
+            highlight_basic={hl_basic}
+            highlight_gold={hl_gold}
+            highlight_empty={hl_empty}
+            highlight_wall={hl_wall}
+        />
+        <SettingsModal show={*open_settings} on_close={close_settings_cb.clone()} show_path={*show_path} on_toggle_path={toggle_path_cb} show_damage_numbers={*show_damage_numbers} on_toggle_damage_numbers={toggle_damage_numbers_cb} on_restart_run={restart_cb_unit.clone()} />
+        <GameOverOverlay show={game_over} time_survived={time_ov} loops_completed={rs_overlay.stats.loops_completed} blocks_mined={rs_overlay.stats.blocks_mined} restart={restart_cb_unit} to_upgrades={to_upgrades_unit} />
     </div> }
 }

@@ -179,4 +179,4 @@ trunk serve --open
 - Performance dips: ensure browser tab is active; background throttling may slow timers (expected in inactive tabs).
 
 ## License
-TBD by project owner.
+Released under the MIT License. See the LICENSE file for details.

@@ -1,5 +1,13 @@
 pub mod app;
+pub mod camera_controls;
+pub mod controls_panel;
+pub mod game_over_overlay;
+pub mod intro_overlay;
 pub mod legend;
+pub mod legend_panel;
 pub mod run_view;
+pub mod settings_modal;
+pub mod stats_panel;
+pub mod time_display;
 pub mod upgrades_view;
 pub use app::App;

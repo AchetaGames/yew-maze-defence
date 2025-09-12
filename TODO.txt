@@ -1,49 +1,100 @@
-Here’s the current upgrade roster extracted from the code, grouped by category with their core data. (Fields: (Enum Id) – Description | Max Lvl | Base Cost | Cost Growth | Unlock Condition)
-HEALTH
-Max Life (Health) – +5 max life / lvl (new run) | 5 | 14 | 1.55 | Always
-Life Regeneration (LifeRegen) – +0.5 life/sec / lvl (in-run) | 4 | 28 | 1.6 | AnyLevel(Health)
-MINING / GOLD
-Mining Speed (MiningSpeed) – +15% base mining speed / lvl | 5 | 10 | 1.6 | Always
-Gold Bounty (GoldGain) – +4% gold per kill / lvl (base 1 once any level) | 5 | 20 | 1.6 | AnyLevel(MiningSpeed)
-Gold Spawn (GoldSpawn) – +3% chance a rock has gold / lvl (future runs) | 5 | 22 | 1.6 | AnyLevel(MiningSpeed)
-Starting Gold (StartingGold) – +3 starting gold / lvl (new run) | 4 | 10 | 1.5 | Always
-Grid Expansion (GridExpand) – +2 grid size (w & h) / lvl (future runs) | 3 | 60 | 1.8 | Maxed(MiningSpeed)
-DAMAGE / OFFENSE
-Tower Damage I (TowerDamage) – +12% base tower damage / lvl | 5 | 12 | 1.6 | Always
-Tower Damage II (TowerDamage2) – +10% additional tower damage / lvl | 5 | 30 | 1.7 | Maxed(TowerDamage)
-Tower Range (TowerRange) – +6% tower range / lvl | 5 | 14 | 1.55 | AnyLevel(TowerDamage)
-Fire Rate (FireRate) – +8% fire rate / lvl | 5 | 16 | 1.55 | AnyLevel(TowerDamage)
-Damage Ramp (DamageRamp) – +3% damage per enemy second alive / lvl | 4 | 32 | 1.65 | AnyLevel(FireRate)
-Crit Chance (CritChance) – +2% crit chance / lvl | 5 | 25 | 1.65 | AnyLevel(FireRate)
-Crit Damage (CritDamage) – +20% crit damage / lvl | 5 | 40 | 1.7 | Maxed(CritChance)
-BOOST / UTILITY
-Unlock Boost Tiles (BoostTilesUnlock) – Enable spawning of Slow & Damage boost tiles (future runs) | 1 | 30 | 2.0 | AnyLevel(MiningSpeed)
-Boost Frequency (BoostTileFrequency) – +20% boost tile weight / lvl | 4 | 35 | 1.65 | AnyLevel(BoostTilesUnlock)
-Boost Diversity (BoostTileDiversity) – Adds new boost variants (future runs) | 1 | 55 | 2.0 | Maxed(BoostTileFrequency)
-RAW ORDER AS DEFINED (for reference / if you keep declaration order)
-MiningSpeed
-TowerDamage
-StartingGold
-Health
-TowerRange
-FireRate
-GoldGain
-GoldSpawn
-LifeRegen
-BoostTilesUnlock
-TowerDamage2
-DamageRamp
-BoostTileFrequency
-CritChance
-CritDamage
-BoostTileDiversity
-GridExpand
-UNLOCK CONDITION LEGEND
-Always: visible & purchasable immediately (given cost and resources).
-AnyLevel(X): appears/activates once X has at least level 1.
-Maxed(X): appears/activates only after X reaches its max level.
-LET ME KNOW IF YOU ALSO WANT
-Suggested re-categorization
-Power curve / cost curve analysis
-Proposed dependency graph simplification
-Early / mid / late game tier tagging
+Upgrade Tree for the Incremental Tower Defense
+In this path-building tower defense, upgrades should span combat, economy, and utility to sustain a long play loop. Upgrades serve as a progression backbone in incremental games, “making the game easier as time goes on but not getting too easy”
+everything-upgrade-tree.fandom.com
+. A deep, branching upgrade tree (as seen in games like Outhold) can reward experimentation and give players meaningful choices
+tellusgames.itch.io
+. Below we outline upgrade categories (mixing your existing ones and many new ideas), with example effects, levels, and how they might interact. (For brevity we omit exact numeric scaling, but each suggestion could be leveled up or gated behind prerequisites as suits the game.)
+Core Survival Upgrades (Health/Durability)
+Maximum Life – Increase the tower/base’s hit points (e.g. +5 HP per level). Raises survivability for harder waves, essential for late-game endurance
+everything-upgrade-tree.fandom.com
+.
+Life Regeneration – Passive healing in-between waves (e.g. +0.5 HP/sec per level). Helps players recover without micromanaging (and synergizes with longer runs).
+Shield or Armor – Grant temporary shields between waves or flat damage reduction. For example, “Shield Battery” could provide an absorb shield that recharges after each wave. This adds another defensive layer beyond raw health.
+Tower Durability – If enemies can damage maze blocks, upgrades here could “harden” blocks (higher hitpoints or immunity), preventing enemy detours.
+Players could specialize into a tanky build by focusing on health/defense, or skip these for faster offense.
+Offensive / Tower Damage Upgrades
+Tower Base Damage I & II – Multiplier or flat bonus to all tower damage (e.g. +10–12% per level). You already have a two-tier damage path (Tower Damage I and II). This core boost is straightforward.
+Fire Rate – Increase the firing speed of towers (e.g. +8–10% per level). Faster fire synergizes with boosts and damage upgrades. (You listed +8% per level.)
+Range – Increase tower range (e.g. +5–6% per level) so towers hit farther along the maze. This can massively change layout strategy by letting towers cover more path.
+Splash / Area Damage – Upgrade that gives a fraction of damage to nearby enemies. For example, “Explosive Rounds”: 10–20% splash radius or damage per level. Adds crowd-control capability.
+Piercing / Penetration – Shots hit an extra target or ignore a percentage of enemy armor/health (useful if enemies have heavy armor later on).
+Elemental Attack Mods – If a tower sits on a particular boost tile, it gains an additional effect. E.g., on a fire tile, towers deal bonus burn damage; on freeze tiles they slow more; on poison tiles they inflict a lingering poison debuff. Such elemental upgrades give flavor diversity: the “Elemental Mastery” paths could amplify those effects.
+Critical Strike Chance & Damage – As you have: small % chance to deal extra damage and a multiplicative crit-damage boost. These make the tower more versatile against bosses.
+Combining these allows synergy. For instance, high fire rate + crit upgrades can make devastating crit chains, while splash + fire/poison boosts combo to blanket the maze in damage-over-time.
+Resource & Economy Upgrades
+Mining Speed – Increase speed of mining gold tiles (e.g. +15% per level). Allows faster resource generation for early defense. (Your list had +15% per level.)
+Gold Per Kill (Bounty) – Increase the gold dropped by defeating enemies (e.g. +3–5% per level). Encourages aggressive play. (You had +4% per level.)
+Gold Spawn Chance – Raises chance for a mined rock to contain gold (e.g. +3% per level). This is a meta-run stat so it affects future runs. (Your “GoldSpawn” entry.)
+Starting Gold – More initial capital each run (e.g. +3 gold per level). Helps new runs get off the ground with stronger initial builds. (Your “StartingGold” suggestion.)
+Passive Income / Interest – A new idea: earn a small % of your current gold each wave as passive income, or interest on gold held. For example, “Capital Growth”: +1–2% interest per level. This rewards saving some gold and increases late-game funds.
+Treasure Hunter – Random events or small chance per wave to find bonus treasures (extra gold or rare resources).
+Resource Salvage – Gain a refund percentage when you destroy a tower or block (e.g. +X% per level). Helps recoup investment from changing maze layouts.
+Having multiple economy paths lets players push for faster growth or steadier late-game gains. For instance, one could heavily upgrade Mining Speed and Starting Gold for explosive early power, or instead focus on Gold Per Kill and Passive Income for steady scaling.
+Boost Tile & Support Upgrades
+Boost Tile Unlocks – You already have “Unlock Boost Tiles” to enable freeze/damage tiles. Continue this approach for future types: e.g. a Lightning Boost tile that occasionally zaps random enemies, or a Healing Tile that repairs nearby towers or heals you each wave.
+Boost Frequency – Increase how often boost tiles appear (you have +20% weight per level). More boosts mean more strategic placement.
+Boost Diversity – Unlock entirely new boost effects (you have +1 new type). Could also upgrade existing boosts. For example, a level-up might make freeze tiles slow 20% more, or fire tiles burn for longer.
+Boost Amplification – A new idea: global boost effect enhancement. E.g. “Boost Mastery”: +X% to all boost tile bonuses. So if normally a freeze tile slows 50%, after upgrades it might slow 60–70%. This makes boost tiles more powerful with each tier.
+Stacked Boosts – If a tower sits on a tile that has multiple boosts (or overlapping boosts), give a synergy bonus. For instance, a tower on both a damage and a gold-boost tile could trigger a special effect (extra area damage, or bonus loot).
+Boost tiles are a hallmark of your design. Players should be able to specialize into, say, a “Gold Support” build by using coin-boost tiles + economy upgrades, or a “Elemental DPS” build by stacking fire/poison boosts plus damage upgrades. In practice, advise strategies like using DoT towers on coin boost tiles for extra gold – indeed one Emberward guide notes “use coin boost tile with damage-over-time towers (like flame thrower or poison) for extra gold”
+steamcommunity.com
+. That kind of synergy should be possible here too.
+Path, Maze and Utility Upgrades
+Grid Expansion – Increase the map size (width & height), giving more building/mine space each run (you have +2 per level). Larger mazes allow more complex layouts and strategic depth.
+Trap/Obstacle Tiles – Allow placing trap tiles (spike pits, mines, or poison gas traps) on the path. Upgrades can improve trap damage or trigger chance. For example, “Spike Trap” that deals flat damage to any enemy passing over it, with levels that increase damage or slow effect.
+Wall/Block Enhancements – If you let enemies damage the maze, upgrades could add health or damage reflection to walls. Even if not, you could have “Reinforced Walls” as a trap that automatically damage nearby enemies when built.
+Teleporters/Portals – Unlock tiles that send passing enemies back to start or to another tile. Upgrade can increase how often they activate or add a small damage per teleport. This creates new routing strategies.
+Enemy Debuffs – Upgrades that apply global debuffs to enemies. For instance, “Cursed Ground”: each level applies a -X% speed or armor reduction to all enemies on screen. (Think of a “fog” that slowly weakens foes.)
+Mapper / Pathfinder – Expand utility by letting players place vision tiles (reveal entire map for a short time) or temporarily reroute enemies. Upgrades could reduce cooldowns on these powers.
+These upgrades deepen the path-building element. For example, Emberward lets players “empower block walls with runes that boost their effectiveness,” suggesting you could similarly allow upgrading wall tiles (e.g. adding a burn rune to a block that damages enemies)
+pcgamer.com
+. Introducing warp or teleporter tiles also diversifies how players manipulate enemy movement and increases replay choices.
+Special Abilities & Miscellaneous Upgrades
+Temporary Spells/Abilities – Give the player active skills unlocked by upgrades. Examples: a Meteor Strike that bombards a target area, or Time Freeze that stops enemies for a few seconds. Upgrades can reduce cooldown or increase effect.
+Auto-Collect – A quality-of-life upgrade: automatically pick up gold or resources from kills without clicking. Reduces manual effort and fits an idle design.
+Prestige/Ascension Mechanics – Meta-upgrade that resets the run but grants a powerful permanent bonus (common in incremental games). E.g. “Ancient Wisdom” that boosts all stats by a small % each prestige. This extends playtime by requiring many runs.
+Synergy Buffs – For example, “Boost Link”: if two towers of the same element (freeze/fire/poison) are adjacent, both get an extra bonus. Encourages thematic builds.
+Tower Morph – After a certain number of kills, a tower could transform into a stronger version (unlocked by upgrades). Like a level-based tower.
+Environmental Hazards – Random events or tiles (like periodic acid rain) that hurt enemies on the path. Upgrades could increase damage or frequency.
+Multiple Lives – If the base (bonfire) can fail, allow extra “lives” per run or insurance that absorbs game over. Lessens punishment.
+By mixing these, you create a richly branched upgrade tree. Players might start by boosting economy to snowball early, then branch into offense or special abilities later. For instance, one could take the “MiningSpeed → GoldGain → StartingGold” chain to accelerate wealth, then unlock strong tower damage and special tiles. Another might focus first on Range/FireRate → Elemental Synergy → Boost Amplification, creating powerful specialized towers on boost tiles. Crucially, every new upgrade should feel meaningful. As one design principle puts it, a good upgrade tree lets players experiment with “unique builds that fit your playstyle”
+tellusgames.itch.io
+. By offering many upgrade paths (economy, offense, defense, support, and special powers) and clear synergies (e.g. DoT towers on coin boosts, or fire tiles enhancing splash upgrades), the game stays engaging and extends playtime. The existing upgrades you listed can slot into these categories, but consider adding the above to deepen choices. In sum, diversify upgrades across: (1) Survival (more HP/shields), (2) Offense (damage, fire rate, special shots), (3) Economy (gold generation & finds), (4) Boost/Support (tile effects and utilities), (5) Path/Routing (traps, portals, expansions), and (6) Miscellaneous/Active (spells, prestige). Each branch can have multiple levels and prerequisites (e.g. Maxed(Damage) unlocks Crit upgrades), creating a sprawling tree. Properly balanced, this ensures the game remains fresh and rewarding even after many runs
+everything-upgrade-tree.fandom.com
+tellusgames.itch.io
+. Sources: Game design discussions suggest deep upgrade trees keep players engaged
+everything-upgrade-tree.fandom.com
+, and hybrids like Outhold use meta-progression and skill trees in tower defense
+tellusgames.itch.io
+. Real games (e.g. Emberward) also show clever use of boost tiles and wall runes to add variety
+steamcommunity.com
+pcgamer.com
+. These principles inspire the above upgrade ideas.
+Citations
+
+Upgrades | Everything Upgrade Tree Wiki | Fandom
+
+https://everything-upgrade-tree.fandom.com/wiki/Upgrades
+
+Outhold by Tellus Games
+
+https://tellusgames.itch.io/outhold
+
+tips for building paths as a new player? :: Emberward Algemene discussies
+
+https://steamcommunity.com/app/2459550/discussions/0/591759753520095639/?l=dutch
+
+Drop blocks to make your own maze in the demo for tower defense game Emberward | PC Gamer
+
+https://www.pcgamer.com/games/strategy/drop-blocks-to-make-your-own-maze-in-the-demo-for-tower-defense-game-emberward/
+
+Outhold by Tellus Games
+
+https://tellusgames.itch.io/outhold
+All Sources
+
+everythi...ee.fandom
+
+tellusgames.itch
+
+steamcommunity
