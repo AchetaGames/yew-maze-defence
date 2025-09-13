@@ -12,7 +12,8 @@ pub fn StatsPanel(props: &StatsPanelProps) -> Html {
     let row_style = "display:flex; align-items:center; gap:8px;"; // icon | label | value
     let icon_style = "width:20px; text-align:center; flex-shrink:0;";
     let label_style = "flex:1; font-weight:500;";
-    let value_style = "min-width:70px; text-align:right; font-variant-numeric:tabular-nums; font-weight:600;";
+    let value_style =
+        "min-width:70px; text-align:right; font-variant-numeric:tabular-nums; font-weight:600;";
     html! {
         <div style="position:absolute; top:12px; left:12px; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:8px; padding:10px 14px; min-width:230px; display:flex; flex-direction:column; gap:10px; font-size:14px;">
             <div style={row_style}>

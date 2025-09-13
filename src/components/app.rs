@@ -1,5 +1,5 @@
 use super::{run_view::RunView, upgrades_view::UpgradesView};
-use crate::model::{GridSize, RunAction, RunState, UpgradeId, UpgradeState, play_area_size_for_level};
+use crate::model::{GridSize, RunAction, RunState, UpgradeId, UpgradeState};
 use yew::prelude::*;
 
 #[derive(PartialEq, Clone)]
@@ -19,7 +19,10 @@ pub struct UpgradeContext {
 pub fn app() -> Html {
     let view = use_state(|| View::Run);
     let run_state = use_reducer(|| {
-        RunState::new_basic(GridSize { width: 10, height: 10 })
+        RunState::new_basic(GridSize {
+            width: 10,
+            height: 10,
+        })
     });
     let upgrade_state = use_state(|| UpgradeState {
         tower_refund_rate_percent: 100,
@@ -36,7 +39,6 @@ pub fn app() -> Html {
                 if let Ok(Some(store)) = win.local_storage() {
                     if let Ok(Some(raw)) = store.get_item("md_upgrade_state") {
                         if let Ok(us) = serde_json::from_str::<UpgradeState>(&raw) {
-                            let play_level = us.level(UpgradeId::PlayAreaSize);
                             upgrade_state.set(us.clone());
                             // Immediately reset run with proper grid size for play area level
                             run_state.dispatch(RunAction::ResetRunWithUpgrades { ups: us.clone() });
@@ -105,7 +107,9 @@ pub fn app() -> Html {
                 return;
             }
             if let Some(cost) = ups.next_cost(id) {
-                if run_state.currencies.research < cost { return; }
+                if run_state.currencies.research < cost {
+                    return;
+                }
                 ups.purchase(id);
                 run_state.dispatch(RunAction::SpendResearch { amount: cost });
                 // If play area size changed, fully reset run to apply new grid dimensions
@@ -139,9 +143,14 @@ pub fn app() -> Html {
                     let _ = store.remove_item("md_setting_show_secondary_stats");
                 }
             }
-            let default_ups = UpgradeState { tower_refund_rate_percent: 100, ..Default::default() };
+            let default_ups = UpgradeState {
+                tower_refund_rate_percent: 100,
+                ..Default::default()
+            };
             upgrade_state.set(default_ups.clone());
-            run_state.dispatch(RunAction::ResetRunWithUpgrades { ups: default_ups.clone() });
+            run_state.dispatch(RunAction::ResetRunWithUpgrades {
+                ups: default_ups.clone(),
+            });
             run_state.dispatch(RunAction::SetResearch { amount: 0 });
             hard_reset_counter.set(*hard_reset_counter + 1);
         })

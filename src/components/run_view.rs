@@ -12,8 +12,8 @@ use crate::util::clog;
 use super::{
     camera_controls::CameraControls, controls_panel::ControlsPanel,
     game_over_overlay::GameOverOverlay, intro_overlay::IntroOverlay, legend_panel::LegendPanel,
-    settings_modal::SettingsModal, stats_panel::StatsPanel, time_display::TimeDisplay,
-    secondary_stats_panel::SecondaryStatsPanel, tower_panel::TowerPanel,
+    secondary_stats_panel::SecondaryStatsPanel, settings_modal::SettingsModal,
+    stats_panel::StatsPanel, time_display::TimeDisplay, tower_panel::TowerPanel,
 };
 
 #[derive(Properties, PartialEq, Clone)]
@@ -120,7 +120,9 @@ pub fn run_view(props: &RunViewProps) -> Html {
                     );
                 }
             }
-            if let Some(f) = &*draw_ref.borrow() { f(); }
+            if let Some(f) = &*draw_ref.borrow() {
+                f();
+            }
             || ()
         });
     }
@@ -438,7 +440,8 @@ pub fn run_view(props: &RunViewProps) -> Html {
                             let rise = (0.8_f64 - dn.ttl).max(0.0_f64) * 0.30_f64;
                             let alpha = life_ratio;
                             ctx.set_fill_style_str(&format!("rgba(255,50,50,{:.3})", alpha));
-                            ctx.fill_text(&dn.amount.to_string(), dn.x, dn.y - rise).ok();
+                            ctx.fill_text(&dn.amount.to_string(), dn.x, dn.y - rise)
+                                .ok();
                         }
                         ctx.set_text_align("start");
                     }
@@ -1697,7 +1700,10 @@ pub fn run_view(props: &RunViewProps) -> Html {
     let hard_reset_cb_unit: Callback<()> = {
         let hard = props.hard_reset.clone();
         let open_settings = open_settings.clone();
-        Callback::from(move |()| { hard.emit(()); open_settings.set(false); })
+        Callback::from(move |()| {
+            hard.emit(());
+            open_settings.set(false);
+        })
     };
     let to_upgrades_unit: Callback<()> = {
         let cb = props.to_upgrades.clone();

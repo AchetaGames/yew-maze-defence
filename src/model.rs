@@ -5,7 +5,6 @@
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 use wasm_bindgen::JsValue;
-use yew::Reducible;
 
 #[allow(dead_code)]
 const DEBUG_LOG: bool = false;
@@ -641,6 +640,7 @@ pub struct Prereq {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UpgradeDef {
     pub id: UpgradeId,
+    pub display_name: &'static str,
     pub category: &'static str,
     pub max_level: u8,
     pub base_cost: u64,
@@ -652,6 +652,7 @@ macro_rules! prereqs { ($($id:ident : $lvl:literal),*$(,)?) => { &[ $( Prereq { 
 pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     UpgradeDef {
         id: UpgradeId::TowerDamage1,
+        display_name: "Tower Damage",
         category: "Damage",
         max_level: 5,
         base_cost: 12,
@@ -661,6 +662,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::HealthStart,
+        display_name: "Max Health",
         category: "Health",
         max_level: 5,
         base_cost: 14,
@@ -670,6 +672,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::VampiricHealing,
+        display_name: "Vampiric Healing",
         category: "Health",
         max_level: 3,
         base_cost: 40,
@@ -679,6 +682,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::LifeRegen,
+        display_name: "Life Regeneration",
         category: "Health",
         max_level: 5,
         base_cost: 35,
@@ -688,6 +692,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::FireRate,
+        display_name: "Fire Rate",
         category: "Damage",
         max_level: 5,
         base_cost: 16,
@@ -697,6 +702,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::CritChance,
+        display_name: "Crit Chance",
         category: "Damage",
         max_level: 5,
         base_cost: 25,
@@ -706,6 +712,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::CritDamage,
+        display_name: "Crit Damage",
         category: "Damage",
         max_level: 5,
         base_cost: 40,
@@ -715,6 +722,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::ProjectileSpeed,
+        display_name: "Projectile Speed",
         category: "Damage",
         max_level: 3,
         base_cost: 20,
@@ -724,6 +732,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::AoeDamage,
+        display_name: "AoE Damage",
         category: "Damage",
         max_level: 3,
         base_cost: 45,
@@ -733,6 +742,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::Bounce,
+        display_name: "Projectile Bounce",
         category: "Damage",
         max_level: 3,
         base_cost: 50,
@@ -742,6 +752,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::MiningSpeed,
+        display_name: "Mining Speed",
         category: "Economy",
         max_level: 5,
         base_cost: 10,
@@ -752,6 +763,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::ResourceRecovery,
+        display_name: "Tower Refund",
         category: "Economy",
         max_level: 5,
         base_cost: 18,
@@ -761,6 +773,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::GoldTileChance,
+        display_name: "Gold Tile Chance",
         category: "Economy",
         max_level: 5,
         base_cost: 22,
@@ -770,6 +783,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::GoldTileReward,
+        display_name: "Gold Tile Reward",
         category: "Economy",
         max_level: 5,
         base_cost: 28,
@@ -779,6 +793,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::StartingGold,
+        display_name: "Starting Gold",
         category: "Economy",
         max_level: 5,
         base_cost: 20,
@@ -788,6 +803,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::Bank,
+        display_name: "Bank Interest",
         category: "Economy",
         max_level: 3,
         base_cost: 50,
@@ -797,6 +813,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::MiningCrit,
+        display_name: "Mining Crit",
         category: "Economy",
         max_level: 3,
         base_cost: 60,
@@ -806,6 +823,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostColdUnlock,
+        display_name: "Unlock Cold Tiles",
         category: "Boost",
         max_level: 1,
         base_cost: 30,
@@ -815,6 +833,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostColdFrequency,
+        display_name: "Cold Frequency",
         category: "Boost",
         max_level: 5,
         base_cost: 20,
@@ -824,6 +843,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostColdSlowAmount,
+        display_name: "Cold Slow Amount",
         category: "Boost",
         max_level: 5,
         base_cost: 25,
@@ -833,6 +853,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostColdSlowDuration,
+        display_name: "Cold Slow Duration",
         category: "Boost",
         max_level: 3,
         base_cost: 35,
@@ -842,6 +863,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostColdFreezeChance,
+        display_name: "Cold Freeze Chance",
         category: "Boost",
         max_level: 3,
         base_cost: 50,
@@ -851,6 +873,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostPoisonUnlock,
+        display_name: "Unlock Poison Tiles",
         category: "Boost",
         max_level: 1,
         base_cost: 35,
@@ -860,6 +883,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostPoisonFrequency,
+        display_name: "Poison Frequency",
         category: "Boost",
         max_level: 5,
         base_cost: 25,
@@ -869,6 +893,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostPoisonDamage,
+        display_name: "Poison Damage",
         category: "Boost",
         max_level: 5,
         base_cost: 30,
@@ -878,6 +903,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostPoisonDuration,
+        display_name: "Poison Duration",
         category: "Boost",
         max_level: 3,
         base_cost: 40,
@@ -887,6 +913,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostPoisonSpread,
+        display_name: "Poison Spread",
         category: "Boost",
         max_level: 3,
         base_cost: 55,
@@ -896,6 +923,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostHealingUnlock,
+        display_name: "Unlock Healing Tiles",
         category: "Boost",
         max_level: 1,
         base_cost: 35,
@@ -905,6 +933,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostHealingFrequency,
+        display_name: "Healing Frequency",
         category: "Boost",
         max_level: 5,
         base_cost: 25,
@@ -914,6 +943,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostHealingPower,
+        display_name: "Healing Power",
         category: "Boost",
         max_level: 5,
         base_cost: 30,
@@ -923,6 +953,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostHealingRadius,
+        display_name: "Healing Radius",
         category: "Boost",
         max_level: 3,
         base_cost: 40,
@@ -932,6 +963,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::BoostHealingShield,
+        display_name: "Healing Shield",
         category: "Boost",
         max_level: 3,
         base_cost: 55,
@@ -941,6 +973,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
     UpgradeDef {
         id: UpgradeId::PlayAreaSize,
+        display_name: "Play Area Size",
         category: "PlayArea",
         max_level: 19, // 0..19 -> 20 sizes
         base_cost: 30,
@@ -950,8 +983,17 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
     },
 ];
 // Progression of square grid sizes for PlayAreaSize levels 0..=19
-pub const PLAY_AREA_SIZES: &[u32] = &[10,14,18,24,32,40,52,64,80,96,112,128,144,160,176,192,208,224,240,255];
-pub fn play_area_size_for_level(level: u8) -> u32 { let i = level as usize; if i >= PLAY_AREA_SIZES.len() { *PLAY_AREA_SIZES.last().unwrap() } else { PLAY_AREA_SIZES[i] } }
+pub const PLAY_AREA_SIZES: &[u32] = &[
+    10, 14, 18, 24, 32, 40, 52, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 255,
+];
+pub fn play_area_size_for_level(level: u8) -> u32 {
+    let i = level as usize;
+    if i >= PLAY_AREA_SIZES.len() {
+        *PLAY_AREA_SIZES.last().unwrap()
+    } else {
+        PLAY_AREA_SIZES[i]
+    }
+}
 impl UpgradeId {
     pub fn key(self) -> &'static str {
         match self {
@@ -1044,7 +1086,9 @@ impl UpgradeState {
         let mut sum = 0u64;
         for def in UPGRADE_DEFS {
             let lvl = self.level(def.id) as i32;
-            if lvl <= 0 { continue; }
+            if lvl <= 0 {
+                continue;
+            }
             for i in 0..lvl {
                 let cost = (def.base_cost as f64 * def.cost_multiplier.powi(i)).round() as u64;
                 sum = sum.saturating_add(cost);
@@ -1072,7 +1116,7 @@ pub fn apply_upgrades_to_run(run: &mut RunState, ups: &UpgradeState) {
         run.currencies.gold = run
             .currencies
             .gold
-            .saturating_add(10 * ups.level(StartingGold) as u64);
+            .saturating_add(2 * ups.level(StartingGold) as u64);
     }
     run.life_max = 10 + 5 * ups.level(HealthStart) as u32; // base adjusted from 20 to 10
     if run.life > run.life_max {
@@ -1114,7 +1158,13 @@ impl yew::Reducible for RunState {
         if let ResetRunWithUpgrades { ups } = &action {
             let prev_r = self.currencies.research;
             let size = play_area_size_for_level(ups.level(UpgradeId::PlayAreaSize));
-            let mut fresh = RunState::new_with_upgrades(GridSize { width: size, height: size }, ups);
+            let mut fresh = RunState::new_with_upgrades(
+                GridSize {
+                    width: size,
+                    height: size,
+                },
+                ups,
+            );
             fresh.currencies.research = prev_r;
             fresh.run_id = self.run_id + 1;
             return Rc::new(fresh);
