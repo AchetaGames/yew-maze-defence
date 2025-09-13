@@ -798,7 +798,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 5,
         base_cost: 20,
         cost_multiplier: 1.55,
-        effect_per_level: "+10 starting gold",
+        effect_per_level: "+2 starting gold",
         prerequisites: prereqs!(GoldTileChance:2),
     },
     UpgradeDef {
