@@ -140,6 +140,8 @@ pub struct RunState {
     pub vampiric_heal_percent: f64,
     pub mining_gold_mul: f64,
     pub mining_crit_chance: f64,
+    // NEW: track how many levels of StartingGold have already been applied to prevent repeated additive grants
+    pub starting_gold_applied_level: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +342,7 @@ impl RunState {
             vampiric_heal_percent: 0.0,
             mining_gold_mul: 1.0,
             mining_crit_chance: 0.0,
+            starting_gold_applied_level: 0,
         };
         rs.path = compute_path(&rs);
         rs.path_loop = build_loop_path(&rs);
@@ -1111,14 +1114,21 @@ pub fn apply_upgrades_to_run(run: &mut RunState, ups: &UpgradeState) {
     run.mining_gold_mul = 1.0 + 0.15 * l(GoldTileReward);
     run.mining_crit_chance = 0.05 * l(MiningCrit);
     if run.stats.time_survived_secs == 0 && !run.started {
-        run.life_max = 10 + 5 * ups.level(HealthStart) as u32; // base adjusted from 20 to 10
+        // Apply life & starting gold only once while pre-run (before any survival time or start)
+        run.life_max = 10 + 5 * ups.level(HealthStart) as u32;
         run.life = run.life_max;
-        run.currencies.gold = run
-            .currencies
-            .gold
-            .saturating_add(2 * ups.level(StartingGold) as u64);
+        let sg_level = ups.level(StartingGold);
+        if sg_level > run.starting_gold_applied_level {
+            let delta_levels = sg_level - run.starting_gold_applied_level;
+            // Each level grants +2 starting gold (matches upgrade definition)
+            run.currencies.gold = run
+                .currencies
+                .gold
+                .saturating_add(2 * delta_levels as u64);
+            run.starting_gold_applied_level = sg_level;
+        }
     }
-    run.life_max = 10 + 5 * ups.level(HealthStart) as u32; // base adjusted from 20 to 10
+    run.life_max = 10 + 5 * ups.level(HealthStart) as u32; // keep max updated for mid-run effects (no gold change mid-run)
     if run.life > run.life_max {
         run.life = run.life_max;
     }
@@ -1133,6 +1143,7 @@ pub fn apply_upgrades_to_run(run: &mut RunState, ups: &UpgradeState) {
         tw.fire_rate = fr * run.tower_fire_rate_global;
     }
 }
+
 // === Actions & Reducer ===
 #[derive(Clone, Debug)]
 pub enum RunAction {
@@ -1603,5 +1614,39 @@ mod tests {
         let rc = Rc::new(rs);
         let after = rc.reduce(super::RunAction::SimTick { dt: 0.016 });
         assert!(after.enemies.len() >= 1, "Enemy did not spawn");
+    }
+
+    #[test]
+    fn starting_gold_applied_only_once() {
+        // Prepare upgrades with StartingGold level 3
+        let mut ups = UpgradeState::default();
+        ups.levels.insert(UpgradeId::StartingGold.key().into(), 3);
+        let rs = RunState::new_with_upgrades(GridSize { width: 10, height: 10 }, &ups);
+        // Base gold is 2, each level +2 => +6 => 8 total
+        assert_eq!(rs.currencies.gold, 8, "Starting gold not applied correctly on new run");
+        assert_eq!(rs.starting_gold_applied_level, 3, "Applied level tracker incorrect");
+        // Simulate mid-run (started) and re-apply upgrades -- should not change gold
+        let mut rs2 = rs.clone();
+        let before = rs2.currencies.gold;
+        rs2.started = true;
+        rs2.stats.time_survived_secs = 5;
+        apply_upgrades_to_run(&mut rs2, &ups);
+        assert_eq!(rs2.currencies.gold, before, "Gold changed mid-run when it should not");
+    }
+
+    #[test]
+    fn starting_gold_applies_difference_incrementally_pre_run() {
+        let mut ups = UpgradeState::default();
+        let mut rs = RunState::new_basic(GridSize { width: 10, height: 10 });
+        // level 0 -> 1
+        ups.levels.insert(UpgradeId::StartingGold.key().into(), 1);
+        apply_upgrades_to_run(&mut rs, &ups);
+        assert_eq!(rs.currencies.gold, 2 + 2 * 1, "Level 1 starting gold incorrect");
+        assert_eq!(rs.starting_gold_applied_level, 1);
+        // level 1 -> 3 adds only +4 more (delta levels =2)
+        ups.levels.insert(UpgradeId::StartingGold.key().into(), 3);
+        apply_upgrades_to_run(&mut rs, &ups);
+        assert_eq!(rs.currencies.gold, 2 + 2 * 3, "Incremental starting gold difference not applied correctly");
+        assert_eq!(rs.starting_gold_applied_level, 3);
     }
 }
