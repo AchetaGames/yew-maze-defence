@@ -399,17 +399,120 @@ pub fn run_view(props: &RunViewProps) -> Html {
                     ctx.set_line_width((1.0f64 / scale_px).max(0.001f64));
                     for e in &rs.enemies {
                         let radius = 0.28 * e.radius_scale;
+
+                        // Calculate enemy color based on debuffs
+                        let mut base_r = 255.0; // Default: Red/orange (hostile)
+                        let mut base_g = 80.0;
+                        let mut base_b = 50.0;
+
+                        // Apply debuff color tints by blending
+                        let mut has_slow = false;
+                        let mut has_poison = false;
+                        let mut has_burn = false;
+                        let mut slow_strength = 0.0;
+                        let mut poison_strength = 0.0;
+                        let mut burn_strength = 0.0;
+
+                        for debuff in &e.debuffs {
+                            match debuff.kind {
+                                model::DebuffKind::Slow => {
+                                    has_slow = true;
+                                    slow_strength = (debuff.remaining / 4.0).min(1.0); // Fade over duration
+                                }
+                                model::DebuffKind::Poison => {
+                                    has_poison = true;
+                                    poison_strength = (debuff.remaining / 4.0).min(1.0);
+                                }
+                                model::DebuffKind::Burn => {
+                                    has_burn = true;
+                                    burn_strength = (debuff.remaining / 4.0).min(1.0);
+                                }
+                            }
+                        }
+
+                        // Blend colors based on debuffs
+                        // Priority: Burn > Slow+Poison > Slow > Poison
+                        if has_burn {
+                            // Burn: Bright orange/yellow (fire) - most visually distinct
+                            base_r = 255.0 * (1.0 - burn_strength) + 255.0 * burn_strength;
+                            base_g = 80.0 * (1.0 - burn_strength) + 140.0 * burn_strength;
+                            base_b = 50.0 * (1.0 - burn_strength) + 0.0 * burn_strength;
+                        } else if has_slow && has_poison {
+                            // Both: Mix blue and green = cyan/teal
+                            let blend = (slow_strength + poison_strength) / 2.0;
+                            base_r = 255.0 * (1.0 - blend) + 0.0 * blend;
+                            base_g = 80.0 * (1.0 - blend) + 200.0 * blend;
+                            base_b = 50.0 * (1.0 - blend) + 180.0 * blend;
+                        } else if has_slow {
+                            // Slow: Blue/cyan tint
+                            base_r = 255.0 * (1.0 - slow_strength) + 50.0 * slow_strength;
+                            base_g = 80.0 * (1.0 - slow_strength) + 150.0 * slow_strength;
+                            base_b = 50.0 * (1.0 - slow_strength) + 255.0 * slow_strength;
+                        } else if has_poison {
+                            // Poison: Green/yellow-green tint
+                            base_r = 255.0 * (1.0 - poison_strength) + 100.0 * poison_strength;
+                            base_g = 80.0 * (1.0 - poison_strength) + 220.0 * poison_strength;
+                            base_b = 50.0 * (1.0 - poison_strength) + 50.0 * poison_strength;
+                        }
+
+                        let enemy_color = format!(
+                            "#{:02x}{:02x}{:02x}",
+                            base_r as u8,
+                            base_g as u8,
+                            base_b as u8
+                        );
+
+                        // Calculate HP percentage
+                        let hp_percent = if e.max_hp > 0 {
+                            (e.hp as f64 / e.max_hp as f64).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+
+                        // Draw background circle (dark, shows missing HP)
                         ctx.begin_path();
-                        ctx.set_fill_style_str("#00eaff");
+                        ctx.set_fill_style_str("#1a2332"); // Dark blue-gray
                         ctx.arc(e.x, e.y, radius, 0.0, std::f64::consts::PI * 2.0)
                             .ok();
                         ctx.fill();
+
+                        // Draw HP circle on top (scales with HP percentage)
+                        // Color now indicates debuff status!
+                        let hp_radius = radius * hp_percent.sqrt(); // sqrt makes it area-based
+                        ctx.begin_path();
+                        ctx.set_fill_style_str(&enemy_color);
+                        ctx.arc(e.x, e.y, hp_radius, 0.0, std::f64::consts::PI * 2.0)
+                            .ok();
+                        ctx.fill();
+
+                        // Outline (always full size)
+                        ctx.begin_path();
                         ctx.set_stroke_style_str("#a80032");
+                        ctx.set_line_width(0.04);
+                        ctx.arc(e.x, e.y, radius, 0.0, std::f64::consts::PI * 2.0)
+                            .ok();
                         ctx.stroke();
                     }
                     for tw in &rs.towers {
                         let cx = tw.x as f64 + 0.5;
                         let cy = tw.y as f64 + 0.5;
+
+                        // Draw boost ring if tower has a boost
+                        if let Some(boost) = tw.boost {
+                            ctx.begin_path();
+                            let boost_color = match boost {
+                                model::BoostKind::Range => "#58a6ff",     // Blue (Healing)
+                                model::BoostKind::Damage => "#64dc37",    // Green (Poison)
+                                model::BoostKind::FireRate => "#f85149",  // Red
+                                model::BoostKind::Slow => "#3296ff",      // Bright Blue (Cold)
+                                model::BoostKind::Fire => "#ff8c00",      // Orange (Fire/Burn)
+                            };
+                            ctx.set_stroke_style_str(boost_color);
+                            ctx.set_line_width(0.08);
+                            ctx.arc(cx, cy, 0.40, 0.0, std::f64::consts::PI * 2.0).ok();
+                            ctx.stroke();
+                        }
+
                         ctx.begin_path();
                         let color = match tw.kind {
                             TowerKind::Basic => "#ffd700",
@@ -420,6 +523,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         ctx.arc(cx, cy, 0.30, 0.0, std::f64::consts::PI * 2.0).ok();
                         ctx.fill();
                         ctx.set_stroke_style_str("#111821");
+                        ctx.set_line_width(0.04);
                         ctx.stroke();
                     }
                     if !rs.projectiles.is_empty() {
@@ -1476,32 +1580,34 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         false,
                         false,
                     ),
-                    model::TileKind::Rock { has_gold: hg, .. } => {
-                        if *hg {
-                            (
-                                Some(format!("({},{}) Gold Rock", hx_u, hy_u)),
-                                false,
-                                false,
-                                false,
-                                false,
-                                false,
-                                true,
-                                false,
-                                false,
-                            )
+                    model::TileKind::Rock { has_gold: hg, boost } => {
+                        // Build rock name with boost type
+                        let boost_name = match boost {
+                            Some(model::BoostKind::Slow) => " (Cold)",
+                            Some(model::BoostKind::Damage) => " (Poison)",
+                            Some(model::BoostKind::Fire) => " (Fire)",
+                            Some(model::BoostKind::Range) => " (Healing)",
+                            Some(model::BoostKind::FireRate) => " (Fire Rate)",
+                            None => "",
+                        };
+
+                        let rock_label = if *hg {
+                            format!("({},{}) Gold Rock{}", hx_u, hy_u, boost_name)
                         } else {
-                            (
-                                Some(format!("({},{}) Rock", hx_u, hy_u)),
-                                false,
-                                false,
-                                false,
-                                false,
-                                true,
-                                false,
-                                false,
-                                false,
-                            )
-                        }
+                            format!("({},{}) Rock{}", hx_u, hy_u, boost_name)
+                        };
+
+                        (
+                            Some(rock_label),
+                            false,
+                            false,
+                            false,
+                            false,
+                            if *hg { false } else { true },
+                            if *hg { true } else { false },
+                            false,
+                            false,
+                        )
                     }
                     model::TileKind::Empty => (
                         Some(format!("({},{}) Path", hx_u, hy_u)),

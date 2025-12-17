@@ -63,8 +63,6 @@ fn upgrade_symbol(id: UpgradeId) -> &'static str {
         CritChance => "✶",
         CritDamage => "💥",
         ProjectileSpeed => "➶",
-        AoeDamage => "☄",
-        Bounce => "🌀",
         HealthStart => "❤",
         VampiricHealing => "🩸",
         LifeRegen => "➕",
@@ -73,23 +71,27 @@ fn upgrade_symbol(id: UpgradeId) -> &'static str {
         GoldTileChance => "💫",
         GoldTileReward => "💰",
         StartingGold => "💵",
-        Bank => "🏦",
         MiningCrit => "⚒",
+        KillBounty => "💀",
         BoostColdUnlock => "❄",
         BoostColdFrequency => "🧊",
         BoostColdSlowAmount => "🥶",
         BoostColdSlowDuration => "🕒",
-        BoostColdFreezeChance => "🧊*",
+        BoostColdRange => "🎯",
         BoostPoisonUnlock => "☠",
         BoostPoisonFrequency => "🧪",
         BoostPoisonDamage => "☣",
         BoostPoisonDuration => "⏳",
-        BoostPoisonSpread => "🌫",
+        BoostPoisonRange => "🎯",
+        BoostFireUnlock => "🔥",
+        BoostFireFrequency => "🌶",
+        BoostFireDamage => "💥",
+        BoostFireDuration => "⏱",
+        BoostFireSpread => "🌋",
+        BoostFireRange => "🎯",
         BoostHealingUnlock => "✚",
         BoostHealingFrequency => "💚",
         BoostHealingPower => "🌿",
-        BoostHealingRadius => "🟢",
-        BoostHealingShield => "🛡",
         PlayAreaSize => "⛶",
     }
 }
@@ -107,12 +109,35 @@ pub fn upgrades_view(props: &UpgradesViewProps) -> Html {
     let research = props.run_state.currencies.research;
     let ups = (*props.upgrade_state).clone();
 
-    // Visibility: only show upgrades whose prerequisites are fully met
-    let visible_ids: HashSet<UpgradeId> = UPGRADE_DEFS
-        .iter()
-        .filter(|d| d.prerequisites.iter().all(|p| ups.level(p.id) >= p.level))
-        .map(|d| d.id)
-        .collect();
+    // Visibility: only show upgrades whose entire parent chain is visible
+    // An upgrade is visible if:
+    // 1. Its direct prerequisites are met
+    // 2. All its prerequisite parents are also visible (recursive check)
+    let mut visible_ids: HashSet<UpgradeId> = HashSet::new();
+    visible_ids.insert(UpgradeId::TowerDamage1); // root is always visible
+
+    let is_visible = |id: UpgradeId, visible: &HashSet<UpgradeId>| -> bool {
+        if let Some(def) = UPGRADE_DEFS.iter().find(|d| d.id == id) {
+            // Check if all prerequisites are met AND their parents are visible
+            def.prerequisites.iter().all(|p| {
+                ups.level(p.id) >= p.level && visible.contains(&p.id)
+            })
+        } else {
+            false
+        }
+    };
+
+    // Iteratively add visible nodes (breadth-first from root)
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for def in UPGRADE_DEFS {
+            if !visible_ids.contains(&def.id) && is_visible(def.id, &visible_ids) {
+                visible_ids.insert(def.id);
+                changed = true;
+            }
+        }
+    }
 
     // Auto-center on first mount
     {

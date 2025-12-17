@@ -32,6 +32,7 @@ pub enum BoostKind {
     Damage,
     FireRate,
     Slow,
+    Fire,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArrowDir {
@@ -79,18 +80,35 @@ pub struct RunStats {
     pub loops_completed: u32,
     pub blocks_mined: u32,
 }
+// -------- Debuff System --------
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DebuffKind {
+    Slow,
+    Poison,
+    Burn,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Debuff {
+    pub kind: DebuffKind,
+    pub remaining: f64, // seconds
+    pub strength: f64,  // For Slow: speed multiplier (0.5 = 50% slow), For Poison: damage per second
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Enemy {
     pub x: f64,
     pub y: f64,
     pub speed_tps: f64,
     pub hp: u32,
+    pub max_hp: u32,
     pub spawned_at: u64,
     pub path_index: usize,
     pub dir_dx: f64,
     pub dir_dy: f64,
     pub radius_scale: f64,
     pub loop_dist: f64,
+    pub debuffs: Vec<Debuff>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DamageNumber {
@@ -140,8 +158,17 @@ pub struct RunState {
     pub vampiric_heal_percent: f64,
     pub mining_gold_mul: f64,
     pub mining_crit_chance: f64,
+    pub tower_refund_mult: f64,
     // NEW: track how many levels of StartingGold have already been applied to prevent repeated additive grants
     pub starting_gold_applied_level: u8,
+    // Player power level based on total upgrades - used to scale enemy difficulty
+    pub player_power_level: f64,
+    // Pre-calculated debuff templates for towers (set by apply_upgrades_to_run)
+    pub cold_debuff_template: Option<Debuff>,
+    pub poison_debuff_template: Option<Debuff>,
+    pub fire_debuff_template: Option<Debuff>,
+    // Fire spread radius (0.0 if BoostFireSpread not upgraded)
+    pub fire_spread_radius: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +186,8 @@ pub struct Tower {
     pub damage: u32,
     pub fire_rate: f64,
     pub cooldown_remaining: f64,
+    pub boost: Option<BoostKind>,
+    pub apply_debuff: Option<Debuff>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Projectile {
@@ -169,22 +198,43 @@ pub struct Projectile {
     pub remaining: f64,
     pub damage: u32,
     pub splash_radius: f64,
+    pub apply_debuff: Option<Debuff>,
 }
 impl Tower {
-    pub fn new(x: u32, y: u32, kind: TowerKind, base_range: f64, base_damage: u32) -> Self {
+    pub fn new(
+        x: u32,
+        y: u32,
+        kind: TowerKind,
+        base_range: f64,
+        base_damage: u32,
+        boost: Option<BoostKind>,
+    ) -> Self {
         let (r_mul, d_mul, fr) = match kind {
             TowerKind::Basic => (1.0, 1.0, 1.0),
             TowerKind::Slow => (1.1, 0.5, 0.75),
             TowerKind::Damage => (0.9, 1.5, 0.8),
         };
+
+        // Apply boost-specific range modifiers
+        let boost_range_mul = match boost {
+            Some(BoostKind::Slow) => 0.7,      // Cold tiles: -30% range (short-range area denial)
+            Some(BoostKind::Fire) => 1.0,      // Fire tiles: normal range
+            Some(BoostKind::Damage) => 1.0,    // Poison tiles: normal range
+            Some(BoostKind::Range) => 1.15,    // Healing tiles: +15% range (synergizes with healing theme)
+            Some(BoostKind::FireRate) => 1.0,  // Fire rate tiles: normal range
+            None => 1.0,                       // No boost: normal range
+        };
+
         Self {
             x,
             y,
             kind,
-            range: base_range * r_mul,
+            range: base_range * r_mul * boost_range_mul,
             damage: (base_damage as f64 * d_mul).round() as u32,
             fire_rate: fr,
             cooldown_remaining: 0.0,
+            boost,
+            apply_debuff: None, // Will be set by apply_upgrades_to_run
         }
     }
 }
@@ -194,29 +244,74 @@ impl RunState {
         gs: GridSize,
         gold_chance: f64,
         boost_kinds: &[BoostKind],
-        boost_freq_weight: f64,
+        _boost_freq_weight: f64,
+        cold_freq: f64,
+        poison_freq: f64,
+        healing_freq: f64,
+        fire_freq: f64,
     ) -> Self {
         let mut tiles = Vec::with_capacity((gs.width * gs.height) as usize);
+        let mut gold_tile_count = 0u32;
         for _y in 0..gs.height {
             for _x in 0..gs.width {
                 let r = js_sys::Math::random();
                 let has_gold = r < gold_chance;
+                if has_gold {
+                    gold_tile_count += 1;
+                }
+
+                // Per-boost-type spawn logic with individual frequency multipliers
+                // Each boost type gets an independent roll (no competition)
                 let boost = if boost_kinds.is_empty() {
                     None
                 } else {
-                    let spawn_chance = 0.05 * boost_freq_weight;
-                    if js_sys::Math::random() < spawn_chance.min(0.90) {
-                        let idx =
-                            (js_sys::Math::random() * boost_kinds.len() as f64).floor() as usize;
-                        Some(boost_kinds[idx])
-                    } else {
+                    let base_spawn_chance = 0.08; // Increased from 0.05 to 8% base
+                    let mut candidates = Vec::new();
+
+                    // Check each boost type independently
+                    for &bk in boost_kinds {
+                        let boost_freq = match bk {
+                            BoostKind::Slow => cold_freq,
+                            BoostKind::Damage => poison_freq,
+                            BoostKind::Range => healing_freq,
+                            BoostKind::Fire => fire_freq,
+                            BoostKind::FireRate => 1.0,
+                        };
+                        let chance = (base_spawn_chance * boost_freq).min(0.25);
+                        if js_sys::Math::random() < chance {
+                            candidates.push(bk);
+                        }
+                    }
+
+                    // If multiple succeeded, pick one randomly
+                    if candidates.is_empty() {
                         None
+                    } else {
+                        let idx = (js_sys::Math::random() * candidates.len() as f64).floor() as usize;
+                        Some(candidates[idx])
                     }
                 };
                 tiles.push(Tile {
                     kind: TileKind::Rock { has_gold, boost },
                     hardness: 3,
                 });
+            }
+        }
+
+        // Ensure minimum gold tiles based on grid size
+        let total_tiles = (gs.width * gs.height) as u32;
+        let min_gold_tiles = (total_tiles as f64 * 0.08).round() as u32; // At least 8% of tiles
+        if gold_tile_count < min_gold_tiles {
+            let needed = min_gold_tiles - gold_tile_count;
+            let mut added = 0u32;
+            for idx in 0..tiles.len() {
+                if added >= needed {
+                    break;
+                }
+                if let TileKind::Rock { has_gold: false, boost } = tiles[idx].kind {
+                    tiles[idx].kind = TileKind::Rock { has_gold: true, boost };
+                    added += 1;
+                }
             }
         }
         // carve start cluster centrally with corridor similar to original implementation
@@ -342,7 +437,13 @@ impl RunState {
             vampiric_heal_percent: 0.0,
             mining_gold_mul: 1.0,
             mining_crit_chance: 0.0,
+            tower_refund_mult: 1.0,
             starting_gold_applied_level: 0,
+            player_power_level: 0.0,
+            cold_debuff_template: None,
+            poison_debuff_template: None,
+            fire_debuff_template: None,
+            fire_spread_radius: 0.0,
         };
         rs.path = compute_path(&rs);
         rs.path_loop = build_loop_path(&rs);
@@ -350,7 +451,7 @@ impl RunState {
         rs
     }
     pub fn new_basic(gs: GridSize) -> Self {
-        Self::create_run_base(gs, 0.12, &[], 1.0)
+        Self::create_run_base(gs, 0.12, &[], 1.0, 1.0, 1.0, 1.0, 1.0)
     }
     pub fn new_with_upgrades(base: GridSize, ups: &UpgradeState) -> Self {
         let grid = base; // no expansion yet
@@ -365,12 +466,23 @@ impl RunState {
         if ups.level(UpgradeId::BoostHealingUnlock) > 0 {
             boosts.push(BoostKind::Range);
         }
+        if ups.level(UpgradeId::BoostFireUnlock) > 0 {
+            boosts.push(BoostKind::Fire);
+        }
         let freq = 1.0
             + 0.05
                 * (ups.level(UpgradeId::BoostColdFrequency)
                     + ups.level(UpgradeId::BoostPoisonFrequency)
-                    + ups.level(UpgradeId::BoostHealingFrequency)) as f64;
-        let mut rs = Self::create_run_base(grid, gold_chance, &boosts, freq);
+                    + ups.level(UpgradeId::BoostHealingFrequency)
+                    + ups.level(UpgradeId::BoostFireFrequency)) as f64;
+
+        // Calculate per-boost-type frequency multipliers
+        let cold_freq = 1.0 + 0.05 * ups.level(UpgradeId::BoostColdFrequency) as f64;
+        let poison_freq = 1.0 + 0.05 * ups.level(UpgradeId::BoostPoisonFrequency) as f64;
+        let healing_freq = 1.0 + 0.05 * ups.level(UpgradeId::BoostHealingFrequency) as f64;
+        let fire_freq = 1.0 + 0.05 * ups.level(UpgradeId::BoostFireFrequency) as f64;
+
+        let mut rs = Self::create_run_base(grid, gold_chance, &boosts, freq, cold_freq, poison_freq, healing_freq, fire_freq);
         apply_upgrades_to_run(&mut rs, ups);
         rs
     }
@@ -605,8 +717,6 @@ pub enum UpgradeId {
     CritChance,
     CritDamage,
     ProjectileSpeed,
-    AoeDamage,
-    Bounce,
     HealthStart,
     VampiricHealing,
     LifeRegen,
@@ -615,23 +725,27 @@ pub enum UpgradeId {
     GoldTileChance,
     GoldTileReward,
     StartingGold,
-    Bank,
     MiningCrit,
+    KillBounty,
     BoostColdUnlock,
     BoostColdFrequency,
     BoostColdSlowAmount,
     BoostColdSlowDuration,
-    BoostColdFreezeChance,
+    BoostColdRange,
     BoostPoisonUnlock,
     BoostPoisonFrequency,
     BoostPoisonDamage,
     BoostPoisonDuration,
-    BoostPoisonSpread,
+    BoostPoisonRange,
+    BoostFireUnlock,
+    BoostFireFrequency,
+    BoostFireDamage,
+    BoostFireDuration,
+    BoostFireSpread,
+    BoostFireRange,
     BoostHealingUnlock,
     BoostHealingFrequency,
     BoostHealingPower,
-    BoostHealingRadius,
-    BoostHealingShield,
     // New meta progression upgrade for expanding grid
     PlayAreaSize,
 }
@@ -734,26 +848,6 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         prerequisites: prereqs!(FireRate:2),
     },
     UpgradeDef {
-        id: UpgradeId::AoeDamage,
-        display_name: "AoE Damage",
-        category: "Damage",
-        max_level: 3,
-        base_cost: 45,
-        cost_multiplier: 1.75,
-        effect_per_level: "+1.5 AoE radius (todo)",
-        prerequisites: prereqs!(ProjectileSpeed:3),
-    },
-    UpgradeDef {
-        id: UpgradeId::Bounce,
-        display_name: "Projectile Bounce",
-        category: "Damage",
-        max_level: 3,
-        base_cost: 50,
-        cost_multiplier: 1.8,
-        effect_per_level: "+1 bounce (todo)",
-        prerequisites: prereqs!(ProjectileSpeed:3),
-    },
-    UpgradeDef {
         id: UpgradeId::MiningSpeed,
         display_name: "Mining Speed",
         category: "Economy",
@@ -771,7 +865,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 5,
         base_cost: 18,
         cost_multiplier: 1.55,
-        effect_per_level: "+20% tower refund (todo)",
+        effect_per_level: "+20% tower refund",
         prerequisites: prereqs!(MiningSpeed:3),
     },
     UpgradeDef {
@@ -802,26 +896,26 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         base_cost: 20,
         cost_multiplier: 1.55,
         effect_per_level: "+2 starting gold",
-        prerequisites: prereqs!(GoldTileChance:2),
-    },
-    UpgradeDef {
-        id: UpgradeId::Bank,
-        display_name: "Bank Interest",
-        category: "Economy",
-        max_level: 3,
-        base_cost: 50,
-        cost_multiplier: 1.8,
-        effect_per_level: "+3% interest (todo)",
-        prerequisites: prereqs!(StartingGold:5),
+        prerequisites: prereqs!(MiningSpeed:2),
     },
     UpgradeDef {
         id: UpgradeId::MiningCrit,
         display_name: "Mining Crit",
         category: "Economy",
         max_level: 3,
+        base_cost: 45,
+        cost_multiplier: 1.7,
+        effect_per_level: "5% mining crit (x2)",
+        prerequisites: prereqs!(GoldTileReward:3),
+    },
+    UpgradeDef {
+        id: UpgradeId::KillBounty,
+        display_name: "Kill Bounty",
+        category: "Economy",
+        max_level: 5,
         base_cost: 60,
         cost_multiplier: 1.85,
-        effect_per_level: "5% mining crit (x2)",
+        effect_per_level: "+1 gold per kill",
         prerequisites: prereqs!(GoldTileReward:5),
     },
     UpgradeDef {
@@ -832,7 +926,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         base_cost: 30,
         cost_multiplier: 1.0,
         effect_per_level: "Unlock Cold tiles",
-        prerequisites: prereqs!(TowerDamage1:3),
+        prerequisites: prereqs!(FireRate:3),
     },
     UpgradeDef {
         id: UpgradeId::BoostColdFrequency,
@@ -841,7 +935,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 5,
         base_cost: 20,
         cost_multiplier: 1.6,
-        effect_per_level: "+5% Cold freq (todo)",
+        effect_per_level: "+5% Cold freq",
         prerequisites: prereqs!(BoostColdUnlock:1),
     },
     UpgradeDef {
@@ -851,7 +945,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 5,
         base_cost: 25,
         cost_multiplier: 1.65,
-        effect_per_level: "+10% slow amount (todo)",
+        effect_per_level: "+10% slow effect",
         prerequisites: prereqs!(BoostColdUnlock:1),
     },
     UpgradeDef {
@@ -861,18 +955,18 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 3,
         base_cost: 35,
         cost_multiplier: 1.7,
-        effect_per_level: "+1s slow dur (todo)",
+        effect_per_level: "+1s slow duration",
         prerequisites: prereqs!(BoostColdSlowAmount:3),
     },
     UpgradeDef {
-        id: UpgradeId::BoostColdFreezeChance,
-        display_name: "Cold Freeze Chance",
+        id: UpgradeId::BoostColdRange,
+        display_name: "Cold Tower Range",
         category: "Boost",
-        max_level: 3,
-        base_cost: 50,
-        cost_multiplier: 1.85,
-        effect_per_level: "+2% freeze (todo)",
-        prerequisites: prereqs!(BoostColdSlowAmount:5),
+        max_level: 5,
+        base_cost: 30,
+        cost_multiplier: 1.65,
+        effect_per_level: "+12% range for cold towers",
+        prerequisites: prereqs!(BoostColdUnlock:1),
     },
     UpgradeDef {
         id: UpgradeId::BoostPoisonUnlock,
@@ -882,7 +976,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         base_cost: 35,
         cost_multiplier: 1.0,
         effect_per_level: "Unlock Poison tiles",
-        prerequisites: prereqs!(TowerDamage1:3),
+        prerequisites: prereqs!(BoostHealingUnlock:1),
     },
     UpgradeDef {
         id: UpgradeId::BoostPoisonFrequency,
@@ -891,7 +985,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 5,
         base_cost: 25,
         cost_multiplier: 1.6,
-        effect_per_level: "+5% Poison freq (todo)",
+        effect_per_level: "+5% Poison freq",
         prerequisites: prereqs!(BoostPoisonUnlock:1),
     },
     UpgradeDef {
@@ -901,7 +995,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 5,
         base_cost: 30,
         cost_multiplier: 1.65,
-        effect_per_level: "+5% poison dmg (todo)",
+        effect_per_level: "+5% damage for towers on poison tiles",
         prerequisites: prereqs!(BoostPoisonUnlock:1),
     },
     UpgradeDef {
@@ -911,18 +1005,78 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 3,
         base_cost: 40,
         cost_multiplier: 1.7,
-        effect_per_level: "+1s poison dur (todo)",
+        effect_per_level: "+1s poison duration",
         prerequisites: prereqs!(BoostPoisonDamage:3),
     },
     UpgradeDef {
-        id: UpgradeId::BoostPoisonSpread,
-        display_name: "Poison Spread",
+        id: UpgradeId::BoostPoisonRange,
+        display_name: "Poison Tower Range",
+        category: "Boost",
+        max_level: 5,
+        base_cost: 30,
+        cost_multiplier: 1.65,
+        effect_per_level: "+12% range for poison towers",
+        prerequisites: prereqs!(BoostPoisonUnlock:1),
+    },
+    UpgradeDef {
+        id: UpgradeId::BoostFireUnlock,
+        display_name: "Unlock Fire Tiles",
+        category: "Boost",
+        max_level: 1,
+        base_cost: 35,
+        cost_multiplier: 1.0,
+        effect_per_level: "Unlock Fire tiles",
+        prerequisites: prereqs!(FireRate:5),
+    },
+    UpgradeDef {
+        id: UpgradeId::BoostFireFrequency,
+        display_name: "Fire Frequency",
+        category: "Boost",
+        max_level: 5,
+        base_cost: 20,
+        cost_multiplier: 1.6,
+        effect_per_level: "+5% Fire freq",
+        prerequisites: prereqs!(BoostFireUnlock:1),
+    },
+    UpgradeDef {
+        id: UpgradeId::BoostFireDamage,
+        display_name: "Fire Damage",
+        category: "Boost",
+        max_level: 5,
+        base_cost: 30,
+        cost_multiplier: 1.65,
+        effect_per_level: "+10% burn damage",
+        prerequisites: prereqs!(BoostFireUnlock:1),
+    },
+    UpgradeDef {
+        id: UpgradeId::BoostFireDuration,
+        display_name: "Fire Duration",
+        category: "Boost",
+        max_level: 3,
+        base_cost: 40,
+        cost_multiplier: 1.7,
+        effect_per_level: "+1s burn duration",
+        prerequisites: prereqs!(BoostFireDamage:3),
+    },
+    UpgradeDef {
+        id: UpgradeId::BoostFireSpread,
+        display_name: "Fire Spread",
         category: "Boost",
         max_level: 3,
         base_cost: 55,
         cost_multiplier: 1.85,
-        effect_per_level: "+1 poison spread (todo)",
-        prerequisites: prereqs!(BoostPoisonDamage:5),
+        effect_per_level: "+1 tile spread radius",
+        prerequisites: prereqs!(BoostFireDamage:5),
+    },
+    UpgradeDef {
+        id: UpgradeId::BoostFireRange,
+        display_name: "Fire Tower Range",
+        category: "Boost",
+        max_level: 5,
+        base_cost: 30,
+        cost_multiplier: 1.65,
+        effect_per_level: "+12% range for fire towers",
+        prerequisites: prereqs!(BoostFireUnlock:1),
     },
     UpgradeDef {
         id: UpgradeId::BoostHealingUnlock,
@@ -932,7 +1086,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         base_cost: 35,
         cost_multiplier: 1.0,
         effect_per_level: "Unlock Healing tiles",
-        prerequisites: prereqs!(VampiricHealing:3),
+        prerequisites: prereqs!(HealthStart:3),
     },
     UpgradeDef {
         id: UpgradeId::BoostHealingFrequency,
@@ -941,7 +1095,7 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 5,
         base_cost: 25,
         cost_multiplier: 1.6,
-        effect_per_level: "+5% Healing freq (todo)",
+        effect_per_level: "+5% Healing freq",
         prerequisites: prereqs!(BoostHealingUnlock:1),
     },
     UpgradeDef {
@@ -951,43 +1105,23 @@ pub static UPGRADE_DEFS: &[UpgradeDef] = &[
         max_level: 5,
         base_cost: 30,
         cost_multiplier: 1.65,
-        effect_per_level: "+10% heal power (todo)",
+        effect_per_level: "+10% range for towers on healing tiles",
         prerequisites: prereqs!(BoostHealingUnlock:1),
-    },
-    UpgradeDef {
-        id: UpgradeId::BoostHealingRadius,
-        display_name: "Healing Radius",
-        category: "Boost",
-        max_level: 3,
-        base_cost: 40,
-        cost_multiplier: 1.7,
-        effect_per_level: "+1 heal radius (todo)",
-        prerequisites: prereqs!(BoostHealingPower:3),
-    },
-    UpgradeDef {
-        id: UpgradeId::BoostHealingShield,
-        display_name: "Healing Shield",
-        category: "Boost",
-        max_level: 3,
-        base_cost: 55,
-        cost_multiplier: 1.85,
-        effect_per_level: "5% shield on heal (todo)",
-        prerequisites: prereqs!(BoostHealingPower:5),
     },
     UpgradeDef {
         id: UpgradeId::PlayAreaSize,
         display_name: "Play Area Size",
         category: "PlayArea",
-        max_level: 19, // 0..19 -> 20 sizes
+        max_level: 10, // 0..10 -> 11 sizes (10x10 to 112x112)
         base_cost: 30,
-        cost_multiplier: 1.4,
+        cost_multiplier: 1.25,
         effect_per_level: "Expand play area size",
-        prerequisites: prereqs!(TowerDamage1:1),
+        prerequisites: prereqs!(MiningSpeed:3),
     },
 ];
-// Progression of square grid sizes for PlayAreaSize levels 0..=19
+// Progression of square grid sizes for PlayAreaSize levels 0..=10
 pub const PLAY_AREA_SIZES: &[u32] = &[
-    10, 14, 18, 24, 32, 40, 52, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 255,
+    10, 14, 18, 24, 32, 40, 52, 64, 80, 96, 112,
 ];
 pub fn play_area_size_for_level(level: u8) -> u32 {
     let i = level as usize;
@@ -1005,8 +1139,6 @@ impl UpgradeId {
             UpgradeId::CritChance => "CritChance",
             UpgradeId::CritDamage => "CritDamage",
             UpgradeId::ProjectileSpeed => "ProjectileSpeed",
-            UpgradeId::AoeDamage => "AoeDamage",
-            UpgradeId::Bounce => "Bounce",
             UpgradeId::HealthStart => "HealthStart",
             UpgradeId::VampiricHealing => "VampiricHealing",
             UpgradeId::LifeRegen => "LifeRegen",
@@ -1015,23 +1147,27 @@ impl UpgradeId {
             UpgradeId::GoldTileChance => "GoldTileChance",
             UpgradeId::GoldTileReward => "GoldTileReward",
             UpgradeId::StartingGold => "StartingGold",
-            UpgradeId::Bank => "Bank",
             UpgradeId::MiningCrit => "MiningCrit",
+            UpgradeId::KillBounty => "KillBounty",
             UpgradeId::BoostColdUnlock => "BoostColdUnlock",
             UpgradeId::BoostColdFrequency => "BoostColdFrequency",
             UpgradeId::BoostColdSlowAmount => "BoostColdSlowAmount",
             UpgradeId::BoostColdSlowDuration => "BoostColdSlowDuration",
-            UpgradeId::BoostColdFreezeChance => "BoostColdFreezeChance",
+            UpgradeId::BoostColdRange => "BoostColdRange",
             UpgradeId::BoostPoisonUnlock => "BoostPoisonUnlock",
             UpgradeId::BoostPoisonFrequency => "BoostPoisonFrequency",
             UpgradeId::BoostPoisonDamage => "BoostPoisonDamage",
             UpgradeId::BoostPoisonDuration => "BoostPoisonDuration",
-            UpgradeId::BoostPoisonSpread => "BoostPoisonSpread",
+            UpgradeId::BoostPoisonRange => "BoostPoisonRange",
+            UpgradeId::BoostFireUnlock => "BoostFireUnlock",
+            UpgradeId::BoostFireFrequency => "BoostFireFrequency",
+            UpgradeId::BoostFireDamage => "BoostFireDamage",
+            UpgradeId::BoostFireDuration => "BoostFireDuration",
+            UpgradeId::BoostFireSpread => "BoostFireSpread",
+            UpgradeId::BoostFireRange => "BoostFireRange",
             UpgradeId::BoostHealingUnlock => "BoostHealingUnlock",
             UpgradeId::BoostHealingFrequency => "BoostHealingFrequency",
             UpgradeId::BoostHealingPower => "BoostHealingPower",
-            UpgradeId::BoostHealingRadius => "BoostHealingRadius",
-            UpgradeId::BoostHealingShield => "BoostHealingShield",
             UpgradeId::PlayAreaSize => "PlayAreaSize",
         }
     }
@@ -1100,9 +1236,119 @@ impl UpgradeState {
         sum
     }
 }
+
+// Helper functions to calculate boost multipliers based on upgrade levels
+pub fn calculate_boost_multipliers(
+    boost: Option<BoostKind>,
+    ups: &UpgradeState,
+) -> (f64, f64, f64) {
+    // Returns (range_mult, damage_mult, fire_rate_mult)
+    let Some(b) = boost else {
+        return (1.0, 1.0, 1.0);
+    };
+
+    use UpgradeId::*;
+    match b {
+        BoostKind::Range => {
+            // Healing tiles: range boost from BoostHealingPower
+            let range = 1.0 + 0.10 * ups.level(BoostHealingPower) as f64;
+            (range, 1.0, 1.0)
+        }
+        BoostKind::Damage => {
+            // Poison tiles: damage boost + range boost
+            let damage = 1.0 + 0.05 * ups.level(BoostPoisonDamage) as f64;
+            let range = 1.0 + 0.12 * ups.level(BoostPoisonRange) as f64;
+            (range, damage, 1.0)
+        }
+        BoostKind::FireRate => {
+            // Future: Fire rate boost tiles (not unlocked yet)
+            (1.0, 1.0, 1.15)
+        }
+        BoostKind::Slow => {
+            // Cold tiles: range boost (compensates for short base range)
+            let range = 1.0 + 0.12 * ups.level(BoostColdRange) as f64;
+            (range, 1.0, 1.0)
+        }
+        BoostKind::Fire => {
+            // Fire tiles: range boost
+            let range = 1.0 + 0.12 * ups.level(BoostFireRange) as f64;
+            (range, 1.0, 1.0)
+        }
+    }
+}
+
+// Helper function to calculate debuff to apply from tower boost
+pub fn calculate_debuff_from_boost(boost: Option<BoostKind>, ups: &UpgradeState) -> Option<Debuff> {
+    let Some(b) = boost else {
+        return None;
+    };
+
+    use UpgradeId::*;
+    match b {
+        BoostKind::Slow => {
+            // Cold tiles apply slow debuff
+            let base_slow = 0.5; // 50% slow baseline
+            let slow_amount = base_slow * (1.0 + 0.10 * ups.level(BoostColdSlowAmount) as f64);
+            let duration = 1.0 + 1.0 * ups.level(BoostColdSlowDuration) as f64;
+            Some(Debuff {
+                kind: DebuffKind::Slow,
+                remaining: duration,
+                strength: slow_amount,
+            })
+        }
+        BoostKind::Damage => {
+            // Poison tiles apply poison DoT debuff
+            let base_dps = 1.0;
+            let dps = base_dps * (1.0 + 0.05 * ups.level(BoostPoisonDamage) as f64);
+            let duration = 2.0 + 1.0 * ups.level(BoostPoisonDuration) as f64;
+            Some(Debuff {
+                kind: DebuffKind::Poison,
+                remaining: duration,
+                strength: dps,
+            })
+        }
+        BoostKind::Fire => {
+            // Fire tiles apply burn DoT debuff
+            let base_dps = 0.5; // Weaker than poison (0.5 vs 1.0) since it can spread
+            let dps = base_dps * (1.0 + 0.10 * ups.level(BoostFireDamage) as f64);
+            let duration = 3.0 + 1.0 * ups.level(BoostFireDuration) as f64;
+            Some(Debuff {
+                kind: DebuffKind::Burn,
+                remaining: duration,
+                strength: dps,
+            })
+        }
+        BoostKind::Range | BoostKind::FireRate => {
+            // These boosts don't apply debuffs
+            None
+        }
+    }
+}
+
 pub fn apply_upgrades_to_run(run: &mut RunState, ups: &UpgradeState) {
     use UpgradeId::*;
     let l = |id: UpgradeId| ups.level(id) as f64;
+
+    // Calculate player power level based on total upgrade levels
+    // This is used to scale enemy difficulty appropriately
+    let mut total_upgrade_levels = 0u32;
+    for def in UPGRADE_DEFS {
+        total_upgrade_levels += ups.level(def.id) as u32;
+    }
+    run.player_power_level = total_upgrade_levels as f64;
+
+    // Pre-calculate debuff templates for towers placed mid-game
+    run.cold_debuff_template = calculate_debuff_from_boost(Some(BoostKind::Slow), ups);
+    run.poison_debuff_template = calculate_debuff_from_boost(Some(BoostKind::Damage), ups);
+    run.fire_debuff_template = calculate_debuff_from_boost(Some(BoostKind::Fire), ups);
+
+    // Calculate fire spread radius (BoostFireSpread upgrade)
+    run.fire_spread_radius = if ups.level(BoostFireSpread) > 0 {
+        ups.level(BoostFireSpread) as f64
+    } else {
+        0.0
+    };
+
     run.mining_speed = 2.0 * (1.0 + 0.08 * l(MiningSpeed));
     run.tower_base_damage = (2.0 * (1.0 + 0.12 * l(TowerDamage1))) as u32;
     run.tower_fire_rate_global = 1.0 + 0.08 * l(FireRate);
@@ -1113,6 +1359,8 @@ pub fn apply_upgrades_to_run(run: &mut RunState, ups: &UpgradeState) {
     run.vampiric_heal_percent = 0.01 * l(VampiricHealing);
     run.mining_gold_mul = 1.0 + 0.15 * l(GoldTileReward);
     run.mining_crit_chance = 0.05 * l(MiningCrit);
+    run.gold_bounty_per_kill = ups.level(KillBounty) as u64;
+    run.tower_refund_mult = 1.0 + 0.20 * l(ResourceRecovery);
     if run.stats.time_survived_secs == 0 && !run.started {
         // Apply life & starting gold only once while pre-run (before any survival time or start)
         run.life_max = 10 + 5 * ups.level(HealthStart) as u32;
@@ -1138,9 +1386,25 @@ pub fn apply_upgrades_to_run(run: &mut RunState, ups: &UpgradeState) {
             TowerKind::Slow => (1.1, 0.5, 0.75),
             TowerKind::Damage => (0.9, 1.5, 0.8),
         };
-        tw.range = run.tower_base_range * rm;
-        tw.damage = ((run.tower_base_damage as f64) * dm).round() as u32;
-        tw.fire_rate = fr * run.tower_fire_rate_global;
+        // Apply boost multipliers
+        let (boost_rm, boost_dm, boost_frm) = calculate_boost_multipliers(tw.boost, ups);
+
+        // Apply boost-specific intrinsic range modifiers (matches Tower::new)
+        let boost_range_mul = match tw.boost {
+            Some(BoostKind::Slow) => 0.7,      // Cold tiles: -30% range
+            Some(BoostKind::Fire) => 1.0,      // Fire tiles: normal range
+            Some(BoostKind::Damage) => 1.0,    // Poison tiles: normal range
+            Some(BoostKind::Range) => 1.15,    // Healing tiles: +15% range (intrinsic)
+            Some(BoostKind::FireRate) => 1.0,  // Fire rate tiles: normal range
+            None => 1.0,                       // No boost: normal range
+        };
+
+        tw.range = run.tower_base_range * rm * boost_rm * boost_range_mul;
+        tw.damage = ((run.tower_base_damage as f64) * dm * boost_dm).round() as u32;
+        tw.fire_rate = fr * run.tower_fire_rate_global * boost_frm;
+
+        // Calculate debuff to apply from tower's boost
+        tw.apply_debuff = calculate_debuff_from_boost(tw.boost, ups);
     }
 }
 
@@ -1256,9 +1520,10 @@ impl yew::Reducible for RunState {
                 new.sim_time += dt;
                 {
                     let t = new.stats.time_survived_secs as f64;
+                    // Gradual spawn rate progression - gives more breathing room
                     let max_interval = 2.0;
-                    let min_interval = 0.5;
-                    let spawn_interval = (max_interval - t * 0.01).max(min_interval);
+                    let min_interval = 0.5; // Not as aggressive (was 0.3)
+                    let spawn_interval = (max_interval - t * 0.015).max(min_interval); // Slower progression (was 0.025)
                     if (new.stats.time_survived_secs as f64 - new.last_enemy_spawn_time_secs)
                         >= spawn_interval
                         && !new.path_loop.is_empty()
@@ -1271,19 +1536,46 @@ impl yew::Reducible for RunState {
                         {
                             let sx = (idx as u32) % new.grid_size.width;
                             let sy = (idx as u32) / new.grid_size.width;
-                            let hp = 5 + (new.stats.loops_completed / 2) as u32;
-                            let speed = 1.5 + (new.stats.loops_completed as f64) * 0.05;
+
+                            // Difficulty scales with: time, loops, AND player power
+                            // This creates a good progression curve:
+                            // - New players (power=0): Easy enemies, can farm research
+                            // - Mid players (power=10-20): Moderate challenge
+                            // - Late players (power=30+): Serious challenge
+
+                            let time_factor = t / 50.0; // Every 50 seconds adds +1 difficulty (much slower!)
+                            let loop_factor = new.stats.loops_completed as f64;
+                            let base_difficulty = time_factor + loop_factor;
+
+                            // Player power scaling: each 15 upgrade levels = +1 difficulty multiplier
+                            // This means upgrades make you stronger for longer before difficulty catches up
+                            let power_mult = 1.0 + (new.player_power_level / 15.0);
+                            let difficulty = base_difficulty * power_mult;
+
+                            // Much gentler exponential HP scaling
+                            let base_hp = 5.0;
+                            let hp_mult = (1.0 + difficulty * 0.10).powf(1.25); // Very gentle curve
+                            let hp = (base_hp * hp_mult).round() as u32;
+
+                            // Speed scales very slowly
+                            let speed = 1.5 + difficulty * 0.05; // Very slow speed increase
+
+                            // Visual scaling - enemies grow larger as they get stronger
+                            let size_scale = (1.0 + difficulty * 0.04).min(2.0); // Was 0.05
+
                             new.enemies.push(Enemy {
                                 x: sx as f64 + 0.5,
                                 y: sy as f64 + 0.5,
                                 speed_tps: speed,
                                 hp,
+                                max_hp: hp,
                                 spawned_at: new.stats.time_survived_secs,
                                 path_index: 0,
                                 dir_dx: 1.0,
                                 dir_dy: 0.0,
-                                radius_scale: 1.0,
+                                radius_scale: size_scale,
                                 loop_dist: 0.0,
+                                debuffs: Vec::new(),
                             });
                             new.last_enemy_spawn_time_secs = new.stats.time_survived_secs as f64;
                         }
@@ -1310,11 +1602,36 @@ impl yew::Reducible for RunState {
                         }
                         if let Some(i) = target {
                             let e = &new.enemies[i];
-                            let dx = e.x - cx;
-                            let dy = e.y - cy;
-                            let dist = (dx * dx + dy * dy).sqrt().max(1e-6);
+
+                            // Predictive aiming: aim at where enemy will be, not where it is
+                            // Calculate initial travel time based on current position
+                            let dx0 = e.x - cx;
+                            let dy0 = e.y - cy;
+                            let dist0 = (dx0 * dx0 + dy0 * dy0).sqrt().max(1e-6);
                             let speed = new.projectile_speed;
+                            let initial_travel = dist0 / speed;
+
+                            // Predict where enemy will be after that time
+                            // Account for slow debuff in prediction
+                            let mut enemy_speed_mult: f64 = 1.0;
+                            for debuff in &e.debuffs {
+                                if matches!(debuff.kind, DebuffKind::Slow) && debuff.remaining > 0.0 {
+                                    enemy_speed_mult = enemy_speed_mult.min(1.0 - debuff.strength);
+                                }
+                            }
+                            let enemy_vx = e.dir_dx * e.speed_tps * enemy_speed_mult;
+                            let enemy_vy = e.dir_dy * e.speed_tps * enemy_speed_mult;
+
+                            // Predicted position (linear approximation)
+                            let pred_x = e.x + enemy_vx * initial_travel;
+                            let pred_y = e.y + enemy_vy * initial_travel;
+
+                            // Aim at predicted position
+                            let dx = pred_x - cx;
+                            let dy = pred_y - cy;
+                            let dist = (dx * dx + dy * dy).sqrt().max(1e-6);
                             let travel = dist / speed;
+
                             let mut dmg = tw.damage as f64;
                             if new.crit_chance > 0.0 && js_sys::Math::random() < new.crit_chance {
                                 dmg *= new.crit_damage_mult;
@@ -1330,6 +1647,7 @@ impl yew::Reducible for RunState {
                                 remaining: travel,
                                 damage: dmg.round() as u32,
                                 splash_radius: 0.0,
+                                apply_debuff: tw.apply_debuff.clone(),
                             });
                             tw.cooldown_remaining =
                                 1.0 / (tw.fire_rate * new.tower_fire_rate_global.max(0.01));
@@ -1384,6 +1702,23 @@ impl yew::Reducible for RunState {
                                             amount: applied,
                                             ttl: 0.8,
                                         });
+
+                                        // Apply debuff if projectile has one
+                                        if let Some(debuff) = &p.apply_debuff {
+                                            // Check if enemy already has this type of debuff
+                                            if let Some(existing) = e
+                                                .debuffs
+                                                .iter_mut()
+                                                .find(|d| d.kind == debuff.kind)
+                                            {
+                                                // Refresh duration and update strength (take max)
+                                                existing.remaining = debuff.remaining;
+                                                existing.strength = existing.strength.max(debuff.strength);
+                                            } else {
+                                                // Add new debuff
+                                                e.debuffs.push(debuff.clone());
+                                            }
+                                        }
                                     }
                                 }
                                 remove = true;
@@ -1396,6 +1731,20 @@ impl yew::Reducible for RunState {
                         }
                     }
                     if !new.enemies.is_empty() {
+                        // Collect burning enemies that died for spread processing
+                        let mut burn_spread_sources: Vec<(f64, f64, Debuff)> = Vec::new();
+                        if new.fire_spread_radius > 0.0 {
+                            for e in &new.enemies {
+                                if e.hp == 0 {
+                                    // Check if enemy has burn debuff
+                                    if let Some(burn) = e.debuffs.iter().find(|d| matches!(d.kind, DebuffKind::Burn) && d.remaining > 0.0) {
+                                        burn_spread_sources.push((e.x, e.y, burn.clone()));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Remove dead enemies before spreading burn (to avoid spreading to already-dead enemies)
                         new.enemies.retain(|e| {
                             if e.hp == 0 {
                                 kills = kills.saturating_add(1);
@@ -1404,6 +1753,36 @@ impl yew::Reducible for RunState {
                                 true
                             }
                         });
+
+                        // Process burn spread to nearby living enemies
+                        if !burn_spread_sources.is_empty() && new.fire_spread_radius > 0.0 {
+                            for (sx, sy, burn) in burn_spread_sources {
+                                let spread_radius_sq = new.fire_spread_radius * new.fire_spread_radius;
+                                for e in &mut new.enemies {
+                                    let dx = e.x - sx;
+                                    let dy = e.y - sy;
+                                    let dist_sq = dx * dx + dy * dy;
+                                    if dist_sq <= spread_radius_sq {
+                                        // Apply weakened burn (50% strength, 50% duration)
+                                        let spread_burn = Debuff {
+                                            kind: DebuffKind::Burn,
+                                            remaining: burn.remaining * 0.5,
+                                            strength: burn.strength * 0.5,
+                                        };
+                                        // Check if enemy already has burn
+                                        if let Some(existing) = e.debuffs.iter_mut().find(|d| matches!(d.kind, DebuffKind::Burn)) {
+                                            // Refresh duration and update strength (take max)
+                                            existing.remaining = existing.remaining.max(spread_burn.remaining);
+                                            existing.strength = existing.strength.max(spread_burn.strength);
+                                        } else {
+                                            // Add new burn
+                                            e.debuffs.push(spread_burn);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         if kills > 0 {
                             new.currencies.research = new.currencies.research.saturating_add(kills);
                             if new.gold_bounty_per_kill > 0 {
@@ -1477,7 +1856,63 @@ impl yew::Reducible for RunState {
                         )
                     };
                     for e in &mut new.enemies {
-                        e.loop_dist += e.speed_tps * dt;
+                        // Process debuffs
+                        let mut speed_mult: f64 = 1.0;
+                        let mut poison_damage = 0u32;
+                        let mut burn_damage = 0u32;
+
+                        // Update debuffs and calculate effects
+                        for debuff in &mut e.debuffs {
+                            debuff.remaining -= dt;
+                            if debuff.remaining > 0.0 {
+                                match debuff.kind {
+                                    DebuffKind::Slow => {
+                                        // Slow reduces speed (strength is the multiplier, e.g., 0.5 = 50% slow)
+                                        speed_mult = speed_mult.min(1.0 - debuff.strength);
+                                    }
+                                    DebuffKind::Poison => {
+                                        // Poison deals damage per second
+                                        poison_damage = poison_damage
+                                            .saturating_add((debuff.strength * dt).round() as u32);
+                                    }
+                                    DebuffKind::Burn => {
+                                        // Burn deals damage per second
+                                        burn_damage = burn_damage
+                                            .saturating_add((debuff.strength * dt).round() as u32);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Remove expired debuffs
+                        e.debuffs.retain(|d| d.remaining > 0.0);
+
+                        // Apply poison damage
+                        if poison_damage > 0 && e.hp > 0 {
+                            e.hp = e.hp.saturating_sub(poison_damage);
+                            // Show damage number for poison
+                            new.damage_numbers.push(DamageNumber {
+                                x: e.x,
+                                y: e.y,
+                                amount: poison_damage,
+                                ttl: 0.6,
+                            });
+                        }
+
+                        // Apply burn damage
+                        if burn_damage > 0 && e.hp > 0 {
+                            e.hp = e.hp.saturating_sub(burn_damage);
+                            // Show damage number for burn
+                            new.damage_numbers.push(DamageNumber {
+                                x: e.x,
+                                y: e.y,
+                                amount: burn_damage,
+                                ttl: 0.6,
+                            });
+                        }
+
+                        // Apply movement with slow multiplier
+                        e.loop_dist += e.speed_tps * dt * speed_mult;
                         if e.loop_dist >= total {
                             e.loop_dist %= total;
                             if new.life > 0 {
@@ -1525,20 +1960,35 @@ impl yew::Reducible for RunState {
                         && !new.towers.iter().any(|t| t.x == x && t.y == y)
                     {
                         new.currencies.gold -= new.tower_cost;
-                        new.towers.push(Tower::new(
+                        // Extract boost from tile if present
+                        let boost = match &new.tiles[idx].kind {
+                            TileKind::Rock { boost, .. } => *boost,
+                            _ => None,
+                        };
+                        let mut tower = Tower::new(
                             x,
                             y,
                             TowerKind::Basic,
                             new.tower_base_range,
                             new.tower_base_damage,
-                        ));
+                            boost,
+                        );
+                        // Set debuff based on boost type using pre-calculated templates
+                        tower.apply_debuff = match boost {
+                            Some(BoostKind::Slow) => new.cold_debuff_template.clone(),
+                            Some(BoostKind::Damage) => new.poison_debuff_template.clone(),
+                            Some(BoostKind::Fire) => new.fire_debuff_template.clone(),
+                            _ => None,
+                        };
+                        new.towers.push(tower);
                     }
                 }
             }
             RemoveTower { x, y } => {
                 if let Some(p) = new.towers.iter().position(|t| t.x == x && t.y == y) {
                     new.towers.remove(p);
-                    new.currencies.gold = new.currencies.gold.saturating_add(new.tower_cost);
+                    let refund = (new.tower_cost as f64 * new.tower_refund_mult).round() as u64;
+                    new.currencies.gold = new.currencies.gold.saturating_add(refund);
                 }
             }
             SpendResearch { amount } => {
