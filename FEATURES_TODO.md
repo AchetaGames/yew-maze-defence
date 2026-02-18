@@ -15,6 +15,7 @@ Last updated: 2025-01-17
 - ✅ Boost frequency upgrades (per-boost-type spawn rates working)
 - ✅ Minimum gold tile guarantee (8% of tiles guaranteed gold)
 - ✅ Predictive aiming for projectiles (towers lead moving targets)
+- ✅ AoE/Splash Damage (projectiles damage nearby enemies with visual explosion)
 
 ---
 
@@ -172,33 +173,13 @@ DebuffKind::Freeze => {
 
 ## 🔴 Hard (High Complexity)
 
-### 8. **AoE/Splash Damage** ⏱️ 3-4 hours
-**Priority:** Medium
-**Files:** `src/model.rs`
+### ~~8. **AoE/Splash Damage**~~ ✅ COMPLETED
 
-Projectiles damage multiple enemies in radius:
-- AoeDamage: "+1.5 AoE radius"
-
-**Implementation:**
-```rust
-// Projectile already has splash_radius field
-// In projectile hit detection:
-if p.splash_radius > 0.0 {
-    for (ei, e) in new.enemies.iter_mut().enumerate() {
-        let dx = e.x - p.x;
-        let dy = e.y - p.y;
-        if dx*dx + dy*dy <= p.splash_radius * p.splash_radius {
-            // Apply damage (reduced for splash)
-            let splash_damage = (p.damage as f64 * 0.5).round() as u32;
-            e.hp = e.hp.saturating_sub(splash_damage);
-        }
-    }
-}
-```
-
-**Visual:** Circle explosion effect on impact.
-
-**Complexity:** High - needs multi-enemy hit detection + visual effects.
+**Implementation Details:**
+- Added `SplashRadius` upgrade (5 levels, +0.5 radius per level, requires TowerDamage1:3)
+- Projectiles deal 50% damage to all enemies within splash radius (excluding primary target)
+- Visual: Orange expanding circle explosion effect on impact
+- Primary target receives full damage + debuffs, splash targets only receive damage
 
 ---
 

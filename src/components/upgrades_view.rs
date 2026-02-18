@@ -1,3 +1,4 @@
+use super::upgrade_summary_panel::UpgradeSummaryPanel;
 use crate::model::{
     play_area_size_for_level, RunAction, RunState, UpgradeId, UpgradeState, UPGRADE_DEFS,
 };
@@ -93,18 +94,19 @@ fn upgrade_symbol(id: UpgradeId) -> &'static str {
         BoostHealingFrequency => "💚",
         BoostHealingPower => "🌿",
         PlayAreaSize => "⛶",
+        SplashRadius => "💣",
     }
 }
 
 #[function_component(UpgradesView)]
 pub fn upgrades_view(props: &UpgradesViewProps) -> Html {
-    // --- State ---
     let zoom = use_state(|| 1.0_f64);
     let offset = use_state(|| (0.0_f64, 0.0_f64));
     let dragging = use_state(|| false);
     let drag_last = use_state(|| (0.0_f64, 0.0_f64));
     let container_ref = use_node_ref();
     let hover_id = use_state(|| Option::<UpgradeId>::None);
+    let summary_collapsed = use_state(|| false);
 
     let research = props.run_state.currencies.research;
     let ups = (*props.upgrade_state).clone();
@@ -119,9 +121,9 @@ pub fn upgrades_view(props: &UpgradesViewProps) -> Html {
     let is_visible = |id: UpgradeId, visible: &HashSet<UpgradeId>| -> bool {
         if let Some(def) = UPGRADE_DEFS.iter().find(|d| d.id == id) {
             // Check if all prerequisites are met AND their parents are visible
-            def.prerequisites.iter().all(|p| {
-                ups.level(p.id) >= p.level && visible.contains(&p.id)
-            })
+            def.prerequisites
+                .iter()
+                .all(|p| ups.level(p.id) >= p.level && visible.contains(&p.id))
         } else {
             false
         }
@@ -755,7 +757,14 @@ pub fn upgrades_view(props: &UpgradesViewProps) -> Html {
                 { for node_html }
                 { tooltip }
             </div>
-            { html!{} }
+            <UpgradeSummaryPanel
+                upgrade_state={ups.clone()}
+                collapsed={*summary_collapsed}
+                on_toggle={{
+                    let summary_collapsed = summary_collapsed.clone();
+                    Callback::from(move |_| summary_collapsed.set(!*summary_collapsed))
+                }}
+            />
         </div>
     }
 }
