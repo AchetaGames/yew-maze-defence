@@ -5,7 +5,7 @@ use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlElement, TouchEvent};
 use yew::prelude::*;
 
-use crate::model::{self, RunAction, RunState, TowerKind};
+use crate::model::{self, RunAction, RunState, TowerKind, UpgradeState};
 use crate::state::{compute_interactable_mask, Camera, Mining, TouchState};
 use crate::util::clog;
 // Replace direct legend row usage with modular components
@@ -13,12 +13,14 @@ use super::{
     camera_controls::CameraControls, controls_panel::ControlsPanel,
     game_over_overlay::GameOverOverlay, intro_overlay::IntroOverlay, legend_panel::LegendPanel,
     secondary_stats_panel::SecondaryStatsPanel, settings_modal::SettingsModal,
-    stats_panel::StatsPanel, time_display::TimeDisplay, tower_panel::TowerPanel,
+    stats_panel::StatsPanel, tile_info_panel::TileInfoPanel, time_display::TimeDisplay,
+    tower_panel::TowerPanel,
 };
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct RunViewProps {
     pub run_state: UseReducerHandle<RunState>,
+    pub upgrade_state: UpgradeState,
     pub to_upgrades: Callback<()>,
     pub restart_run: Callback<()>,
     pub hard_reset: Callback<()>,
@@ -53,6 +55,8 @@ pub fn run_view(props: &RunViewProps) -> Html {
         true // default ON
     });
     let show_damage_numbers_flag = use_mut_ref(|| true);
+    let show_debug = use_state(|| false);
+    let show_debug_flag = use_mut_ref(|| false);
     // new: show secondary stats setting
     let show_secondary_stats = use_state(|| {
         if let Some(win) = web_sys::window() {
@@ -68,6 +72,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
     let touch_state = use_mut_ref(|| TouchState::default());
     let tower_feedback = use_state(|| String::new());
     let hover_tile = use_mut_ref(|| (-1_i32, -1_i32));
+    let selected_tower_kind = use_mut_ref(|| model::TowerKind::Basic);
     let hover_tile_effect = hover_tile.clone(); // clone for effects to avoid moving original
     let tower_feedback_for_effect = tower_feedback.clone();
     // NEW: intro overlay visibility (persist across sessions)
@@ -126,6 +131,14 @@ pub fn run_view(props: &RunViewProps) -> Html {
             || ()
         });
     }
+    {
+        let flag = *show_debug;
+        let r = show_debug_flag.clone();
+        use_effect_with(flag, move |_| {
+            *r.borrow_mut() = flag;
+            || ()
+        });
+    }
     // Effect: toggle secondary stats persistence
     {
         let flag = *show_secondary_stats;
@@ -171,6 +184,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
         let draw_ref_setup = draw_ref.clone();
         let mining_setup = mining.clone();
         let hover_tile_effect_local = hover_tile_effect.clone();
+        let selected_tower_kind_effect = selected_tower_kind.clone();
         // Clone state handles so the originals remain usable in render scope
         let tower_feedback_clone = tower_feedback_for_effect.clone();
         let show_intro_clone = show_intro.clone();
@@ -178,6 +192,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
             // Use cloned handles inside effect
             let tower_feedback_handle = tower_feedback_clone.clone();
             let show_intro_handle = show_intro_clone.clone();
+            let selected_tower_kind_handle = selected_tower_kind_effect.clone();
             let window = web_sys::window().expect("window");
             let document = window.document().expect("document");
             let canvas: HtmlCanvasElement = canvas_ref.cast::<HtmlCanvasElement>().expect("canvas");
@@ -241,8 +256,10 @@ pub fn run_view(props: &RunViewProps) -> Html {
                 let mining = mining_setup.clone();
                 let show_path_flag = show_path_flag.clone();
                 let show_damage_numbers_flag = show_damage_numbers_flag.clone();
+                let show_debug_flag = show_debug_flag.clone();
                 let hover_tile_draw = hover_tile_effect_local.clone();
                 let tower_feedback_draw = tower_feedback_handle.clone();
+                let selected_tower_kind_draw = selected_tower_kind_handle.clone();
                 Rc::new(move || {
                     if !canvas.is_connected() {
                         return;
@@ -294,17 +311,31 @@ pub fn run_view(props: &RunViewProps) -> Html {
                                     let ry = y as f64 + margin;
                                     let rw = 1.0 - 2.0 * margin;
                                     let rh = rw;
-                                    let fill = if has_gold {
-                                        "#4d3b1f"
-                                    } else {
-                                        match boost {
-                                            Some(model::BoostKind::Slow) => "#203a5a",
-                                            Some(model::BoostKind::Damage) => "#5a2320",
-                                            _ => "#1d2430",
+                                    let fill = match boost {
+                                        Some(model::BoostKind::Slow) => "#203a5a",
+                                        Some(model::BoostKind::Damage) => "#5a2320",
+                                        Some(model::BoostKind::Fire) => "#5a3520",
+                                        Some(model::BoostKind::Range) => "#204a3a",
+                                        Some(model::BoostKind::FireRate) => "#4a3a20",
+                                        None => {
+                                            if has_gold {
+                                                "#4d3b1f"
+                                            } else {
+                                                "#1d2430"
+                                            }
                                         }
                                     };
                                     ctx.set_fill_style_str(fill);
                                     ctx.fill_rect(rx, ry, rw, rh);
+                                    if has_gold && boost.is_some() {
+                                        ctx.set_fill_style_str("#d4af37");
+                                        ctx.fill_rect(
+                                            rx + rw * 0.35,
+                                            ry + rh * 0.35,
+                                            rw * 0.3,
+                                            rh * 0.3,
+                                        );
+                                    }
                                     ctx.set_stroke_style_str("#3a4455");
                                     ctx.set_line_width((1.0f64 / scale_px).max(0.001f64));
                                     ctx.stroke_rect(rx, ry, rw, rh);
@@ -409,15 +440,18 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         let mut has_slow = false;
                         let mut has_poison = false;
                         let mut has_burn = false;
+                        let mut has_freeze = false;
                         let mut slow_strength = 0.0;
                         let mut poison_strength = 0.0;
                         let mut burn_strength = 0.0;
+                        let mut freeze_strength = 0.0;
 
                         for debuff in &e.debuffs {
                             match debuff.kind {
                                 model::DebuffKind::Slow => {
                                     has_slow = true;
-                                    slow_strength = (debuff.remaining / 4.0).min(1.0); // Fade over duration
+                                    slow_strength = (debuff.remaining / 4.0).min(1.0);
+                                    // Fade over duration
                                 }
                                 model::DebuffKind::Poison => {
                                     has_poison = true;
@@ -427,16 +461,23 @@ pub fn run_view(props: &RunViewProps) -> Html {
                                     has_burn = true;
                                     burn_strength = (debuff.remaining / 4.0).min(1.0);
                                 }
+                                model::DebuffKind::Freeze => {
+                                    has_freeze = true;
+                                    freeze_strength = (debuff.remaining / 4.0).min(1.0);
+                                }
                             }
                         }
 
                         // Blend colors based on debuffs
-                        // Priority: Burn > Slow+Poison > Slow > Poison
                         if has_burn {
                             // Burn: Bright orange/yellow (fire) - most visually distinct
                             base_r = 255.0 * (1.0 - burn_strength) + 255.0 * burn_strength;
                             base_g = 80.0 * (1.0 - burn_strength) + 140.0 * burn_strength;
                             base_b = 50.0 * (1.0 - burn_strength) + 0.0 * burn_strength;
+                        } else if has_freeze {
+                            base_r = 255.0 * (1.0 - freeze_strength) + 136.0 * freeze_strength;
+                            base_g = 80.0 * (1.0 - freeze_strength) + 204.0 * freeze_strength;
+                            base_b = 50.0 * (1.0 - freeze_strength) + 255.0 * freeze_strength;
                         } else if has_slow && has_poison {
                             // Both: Mix blue and green = cyan/teal
                             let blend = (slow_strength + poison_strength) / 2.0;
@@ -457,9 +498,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
 
                         let enemy_color = format!(
                             "#{:02x}{:02x}{:02x}",
-                            base_r as u8,
-                            base_g as u8,
-                            base_b as u8
+                            base_r as u8, base_g as u8, base_b as u8
                         );
 
                         // Calculate HP percentage
@@ -501,11 +540,11 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         if let Some(boost) = tw.boost {
                             ctx.begin_path();
                             let boost_color = match boost {
-                                model::BoostKind::Range => "#58a6ff",     // Blue (Healing)
-                                model::BoostKind::Damage => "#64dc37",    // Green (Poison)
-                                model::BoostKind::FireRate => "#f85149",  // Red
-                                model::BoostKind::Slow => "#3296ff",      // Bright Blue (Cold)
-                                model::BoostKind::Fire => "#ff8c00",      // Orange (Fire/Burn)
+                                model::BoostKind::Range => "#58a6ff",    // Blue (Healing)
+                                model::BoostKind::Damage => "#64dc37",   // Green (Poison)
+                                model::BoostKind::FireRate => "#f85149", // Red
+                                model::BoostKind::Slow => "#3296ff",     // Bright Blue (Cold)
+                                model::BoostKind::Fire => "#ff8c00",     // Orange (Fire/Burn)
                             };
                             ctx.set_stroke_style_str(boost_color);
                             ctx.set_line_width(0.08);
@@ -516,7 +555,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         ctx.begin_path();
                         let color = match tw.kind {
                             TowerKind::Basic => "#ffd700",
-                            TowerKind::Slow => "#2ea043",
+                            TowerKind::Slow => "#58a6ff",
                             TowerKind::Damage => "#f85149",
                         };
                         ctx.set_fill_style_str(color);
@@ -535,17 +574,60 @@ pub fn run_view(props: &RunViewProps) -> Html {
                             ctx.fill();
                         }
                     }
+                    for se in &rs.splash_explosions {
+                        let life_ratio = (se.ttl / 0.25).clamp(0.0, 1.0);
+                        let alpha = life_ratio * 0.6;
+                        let current_radius = se.radius * (1.0 - life_ratio * 0.3);
+                        ctx.begin_path();
+                        ctx.arc(se.x, se.y, current_radius, 0.0, std::f64::consts::PI * 2.0)
+                            .ok();
+                        ctx.set_fill_style_str(&format!("rgba(255,160,50,{:.3})", alpha));
+                        ctx.fill();
+                        ctx.set_stroke_style_str(&format!("rgba(255,100,30,{:.3})", alpha));
+                        ctx.set_line_width(0.06);
+                        ctx.stroke();
+                    }
                     // Damage numbers (floating text)
                     if show_damage_nums_on && !rs.damage_numbers.is_empty() {
-                        ctx.set_font(&format!("{}px sans-serif", (0.2 / scale_px).max(0.5))); // 10% of prior 6.0 baseline
+                        let base_font_size = (0.2 / scale_px).max(0.5);
                         ctx.set_text_align("center");
                         for dn in &rs.damage_numbers {
                             let life_ratio = (dn.ttl / 0.8_f64).clamp(0.0, 1.0);
                             let rise = (0.8_f64 - dn.ttl).max(0.0_f64) * 0.30_f64;
                             let alpha = life_ratio;
-                            ctx.set_fill_style_str(&format!("rgba(255,50,50,{:.3})", alpha));
-                            ctx.fill_text(&dn.amount.to_string(), dn.x, dn.y - rise)
-                                .ok();
+                            if dn.is_heal {
+                                ctx.set_font(&format!(
+                                    "bold {}px sans-serif",
+                                    base_font_size * 1.2
+                                ));
+                                ctx.set_fill_style_str(&format!("rgba(46,160,67,{:.3})", alpha));
+                                ctx.fill_text(&format!("+{}", dn.amount), dn.x, dn.y - rise)
+                                    .ok();
+                            } else if dn.is_gold {
+                                if dn.is_crit {
+                                    ctx.set_font(&format!(
+                                        "bold {}px sans-serif",
+                                        base_font_size * 1.5
+                                    ));
+                                    ctx.set_fill_style_str(&format!(
+                                        "rgba(255,215,0,{:.3})",
+                                        alpha
+                                    ));
+                                } else {
+                                    ctx.set_font(&format!("{}px sans-serif", base_font_size));
+                                    ctx.set_fill_style_str(&format!(
+                                        "rgba(210,153,34,{:.3})",
+                                        alpha
+                                    ));
+                                }
+                                ctx.fill_text(&format!("+{}", dn.amount), dn.x, dn.y - rise)
+                                    .ok();
+                            } else {
+                                ctx.set_font(&format!("{}px sans-serif", base_font_size));
+                                ctx.set_fill_style_str(&format!("rgba(255,50,50,{:.3})", alpha));
+                                ctx.fill_text(&dn.amount.to_string(), dn.x, dn.y - rise)
+                                    .ok();
+                            }
                         }
                         ctx.set_text_align("start");
                     }
@@ -611,6 +693,12 @@ pub fn run_view(props: &RunViewProps) -> Html {
                     let (hx, hy) = *hover_tile_draw.borrow();
                     if hx >= 0 && hy >= 0 {
                         if (hx as u32) < gs.width && (hy as u32) < gs.height {
+                            let selected_kind = selected_tower_kind_draw.borrow().clone();
+                            let selected_kind_label = match selected_kind {
+                                TowerKind::Basic => "Basic",
+                                TowerKind::Slow => "Slow",
+                                TowerKind::Damage => "Damage",
+                            };
                             let idx = (hy as u32 * gs.width + hx as u32) as usize;
                             let interact_ok = interact_mask[idx];
                             let (color_opt, msg, show_range) = if !interact_ok {
@@ -654,7 +742,10 @@ pub fn run_view(props: &RunViewProps) -> Html {
                             } else {
                                 (
                                     Some("rgba(46,160,67,0.45)"),
-                                    format!("T: place ({}g)", rs.tower_cost),
+                                    format!(
+                                        "T: place {} ({}g)",
+                                        selected_kind_label, rs.tower_cost
+                                    ),
                                     true,
                                 )
                             };
@@ -680,6 +771,38 @@ pub fn run_view(props: &RunViewProps) -> Html {
                                 tower_feedback_draw.set(msg);
                             }
                         }
+                    }
+                    if *show_debug_flag.borrow() {
+                        ctx.save();
+                        ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0).ok();
+                        let pw = 200.0;
+                        let ph = 120.0;
+                        let px = w - pw - 10.0;
+                        let py = 10.0;
+                        ctx.set_fill_style_str("rgba(14,17,22,0.85)");
+                        ctx.fill_rect(px, py, pw, ph);
+                        ctx.set_stroke_style_str("#30363d");
+                        ctx.stroke_rect(px, py, pw, ph);
+                        ctx.set_fill_style_str("#e6edf3");
+                        ctx.set_font("12px monospace");
+                        ctx.set_text_align("left");
+                        let tx = px + 8.0;
+                        let mut ty = py + 18.0;
+                        let _ = ctx.fill_text(&format!("Enemies: {}", rs.enemies.len()), tx, ty);
+                        ty += 20.0;
+                        let _ = ctx.fill_text(&format!("Towers: {}", rs.towers.len()), tx, ty);
+                        ty += 20.0;
+                        let _ = ctx.fill_text(
+                            &format!("Projectiles: {}", rs.projectiles.len()),
+                            tx,
+                            ty,
+                        );
+                        ty += 20.0;
+                        let _ =
+                            ctx.fill_text(&format!("Path: {} tiles", rs.path_loop.len()), tx, ty);
+                        ty += 20.0;
+                        let _ = ctx.fill_text(&format!("Sim: {:.1}s", rs.sim_time), tx, ty);
+                        ctx.restore();
                     }
                 })
             };
@@ -839,6 +962,8 @@ pub fn run_view(props: &RunViewProps) -> Html {
                 let tower_feedback_hotkey = tower_feedback_handle.clone();
                 let draw_ref_k = draw_ref_setup.clone();
                 let show_intro_handle_k = show_intro_handle.clone();
+                let show_debug_k = show_debug.clone();
+                let selected_tower_kind_k = selected_tower_kind_handle.clone();
                 Closure::wrap(Box::new(move |e: web_sys::KeyboardEvent| {
                     // Spacebar: dismiss intro if showing, else toggle pause
                     let key = e.key();
@@ -860,6 +985,30 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         }
                         return;
                     }
+                    match key.as_str() {
+                        "1" => {
+                            *selected_tower_kind_k.borrow_mut() = model::TowerKind::Basic;
+                            if let Some(f) = &*draw_ref_k.borrow() {
+                                f();
+                            }
+                            return;
+                        }
+                        "2" => {
+                            *selected_tower_kind_k.borrow_mut() = model::TowerKind::Slow;
+                            if let Some(f) = &*draw_ref_k.borrow() {
+                                f();
+                            }
+                            return;
+                        }
+                        "3" => {
+                            *selected_tower_kind_k.borrow_mut() = model::TowerKind::Damage;
+                            if let Some(f) = &*draw_ref_k.borrow() {
+                                f();
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
                     // T: place/remove tower
                     if key == "t" || key == "T" {
                         e.prevent_default();
@@ -867,6 +1016,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         if hx < 0 || hy < 0 {
                             return;
                         }
+                        let kind = selected_tower_kind_k.borrow().clone();
                         let handle = run_state_ref_ct.borrow().clone();
                         let rs = (*handle).clone();
                         if rs.game_over {
@@ -904,6 +1054,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
                                 handle.dispatch(RunAction::PlaceTower {
                                     x: hx as u32,
                                     y: hy as u32,
+                                    kind: kind.clone(),
                                 });
                                 tower_feedback_hotkey.set("Tower placed".into());
                                 if was_paused {
@@ -930,6 +1081,7 @@ pub fn run_view(props: &RunViewProps) -> Html {
                                 handle.dispatch(RunAction::PlaceTower {
                                     x: hx as u32,
                                     y: hy as u32,
+                                    kind,
                                 });
                                 tower_feedback_hotkey.set("Tower placed".into());
                                 if was_paused {
@@ -942,6 +1094,9 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         if let Some(f) = &*draw_ref_k.borrow() {
                             f();
                         }
+                    }
+                    if key == "d" || key == "D" {
+                        show_debug_k.set(!*show_debug_k);
                     }
                 }) as Box<dyn FnMut(_)>)
             };
@@ -1580,7 +1735,10 @@ pub fn run_view(props: &RunViewProps) -> Html {
                         false,
                         false,
                     ),
-                    model::TileKind::Rock { has_gold: hg, boost } => {
+                    model::TileKind::Rock {
+                        has_gold: hg,
+                        boost,
+                    } => {
                         // Build rock name with boost type
                         let boost_name = match boost {
                             Some(model::BoostKind::Slow) => " (Cold)",
@@ -1648,6 +1806,23 @@ pub fn run_view(props: &RunViewProps) -> Html {
             }
         } else {
             (None, false, false, false, false, false, false, false, false)
+        }
+    };
+
+    let (hovered_tile_kind, hovered_tile_x, hovered_tile_y) = {
+        let (hx, hy) = *hover_tile.borrow();
+        if hx >= 0 && hy >= 0 {
+            let hx_u = hx as u32;
+            let hy_u = hy as u32;
+            let gs = rs_snapshot.grid_size;
+            if hx_u < gs.width && hy_u < gs.height {
+                let idx = (hy_u * gs.width + hx_u) as usize;
+                (Some(rs_snapshot.tiles[idx].kind.clone()), hx, hy)
+            } else {
+                (None, -1, -1)
+            }
+        } else {
+            (None, -1, -1)
         }
     };
 
@@ -1899,6 +2074,12 @@ pub fn run_view(props: &RunViewProps) -> Html {
             highlight_gold={hl_gold}
             highlight_empty={hl_empty}
             highlight_wall={hl_wall}
+        />
+        <TileInfoPanel
+            tile={hovered_tile_kind}
+            tile_x={hovered_tile_x}
+            tile_y={hovered_tile_y}
+            upgrade_state={props.upgrade_state.clone()}
         />
         <SettingsModal
             show={*open_settings}
