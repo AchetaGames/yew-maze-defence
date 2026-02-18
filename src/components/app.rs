@@ -141,6 +141,7 @@ pub fn app() -> Html {
                     let _ = store.remove_item("md_setting_show_path");
                     let _ = store.remove_item("md_setting_show_damage_numbers");
                     let _ = store.remove_item("md_setting_show_secondary_stats");
+                    let _ = store.remove_item("md_records");
                 }
             }
             let default_ups = UpgradeState {
@@ -160,6 +161,7 @@ pub fn app() -> Html {
         View::Run => html! { <RunView
             key={*hard_reset_counter}
             run_state={run_state.clone()}
+            upgrade_state={(*upgrade_state).clone()}
             to_upgrades={to_upgrades.clone()}
             restart_run={{
                 let run_state = run_state.clone();
